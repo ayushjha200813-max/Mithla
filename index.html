@@ -7,6 +7,152 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Poppins:wght@300;400;500;600;700;800&family=Tiro+Devanagari+Sanskrit&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection, addDoc, query, orderBy, limit, serverTimestamp, increment, updateDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBFW57kHt3KeIRCk69TWHPuPwIX1bR2xxs",
+      authDomain: "mithla-tent.firebaseapp.com",
+      projectId: "mithla-tent",
+      storageBucket: "mithla-tent.firebasestorage.app",
+      messagingSenderId: "109720048957",
+      appId: "1:109720048957:web:5ac171566c42ad332d6154",
+      measurementId: "G-ZQWEM912EG"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+
+    // ── 1. VIEWS ──────────────────────────────────────────────
+    async function firebaseIncrementView(){
+      if(sessionStorage.getItem('mithla_visited')) return;
+      sessionStorage.setItem('mithla_visited','1');
+      const ref = doc(db,'site','views');
+      const today = new Date().toISOString().slice(0,10);
+      try {
+        await setDoc(ref, { total: increment(1), [today]: increment(1) }, { merge:true });
+      } catch(e){ console.warn('view inc failed',e); }
+    }
+
+    async function firebaseListenViews(){
+      const ref = doc(db,'site','views');
+      onSnapshot(ref, snap => {
+        const data = snap.data() || {};
+        const total = data.total || 0;
+        // Update hero display
+        const el = document.getElementById('liveViewCount');
+        if(el){
+          // animate from current to new
+          const from = parseInt(el.textContent.replace(/,/g,'')) || 0;
+          animateCount(el, from, total, 1200);
+        }
+        // Update admin CRM stats
+        const av = document.getElementById('crmTotalViews');
+        if(av) av.textContent = total.toLocaleString('en-IN');
+        const today = new Date().toISOString().slice(0,10);
+        const td = document.getElementById('crmTodayViews');
+        if(td) td.textContent = data[today] || 0;
+      }, err => console.warn('views listen fail',err));
+    }
+
+    function animateCount(el, from, to, ms){
+      const start = performance.now();
+      function step(now){
+        const p = Math.min((now-start)/ms,1);
+        el.textContent = Math.floor(from+(to-from)*(1-Math.pow(1-p,3))).toLocaleString('en-IN');
+        if(p<1) requestAnimationFrame(step);
+        else el.textContent = to.toLocaleString('en-IN');
+      }
+      requestAnimationFrame(step);
+    }
+
+    // ── 2. LEADS / BOOKINGS ───────────────────────────────────
+    async function firebaseSaveLead(lead){
+      try {
+        const ref = await addDoc(collection(db,'leads'), {
+          ...lead, createdAt: serverTimestamp()
+        });
+        lead.firebaseId = ref.id;
+      } catch(e){ console.warn('lead save failed',e); }
+    }
+
+    async function firebaseListenLeads(){
+      const q = query(collection(db,'leads'), orderBy('createdAt','desc'), limit(100));
+      onSnapshot(q, snap => {
+        const leads = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        // Sync to localStorage as cache
+        localStorage.setItem('mithla_leads', JSON.stringify(leads));
+        // Re-render CRM if open
+        if(document.getElementById('crmList') && document.getElementById('crmPanel')?.classList.contains('active')){
+          if(typeof renderCRM === 'function') renderCRM();
+        }
+        // Update lead count
+        const el = document.getElementById('crmTotalLeads');
+        if(el) el.textContent = leads.length;
+      }, err => console.warn('leads listen fail',err));
+    }
+
+    async function firebaseUpdateLeadStatus(firebaseId, status){
+      if(!firebaseId) return;
+      try { await updateDoc(doc(db,'leads',firebaseId), { status }); }
+      catch(e){ console.warn('status update fail',e); }
+    }
+
+    async function firebaseSaveLeadNote(firebaseId, note){
+      if(!firebaseId) return;
+      try { await updateDoc(doc(db,'leads',firebaseId), { note }); }
+      catch(e){ console.warn('note save fail',e); }
+    }
+
+    // ── 3. NOTIFICATIONS ──────────────────────────────────────
+    async function firebaseSendNotification(notif){
+      try {
+        await setDoc(doc(db,'notifications',String(notif.id)), notif);
+      } catch(e){ console.warn('notif send fail',e); }
+    }
+
+    async function firebaseListenNotifications(){
+      const q = query(collection(db,'notifications'), orderBy('id','desc'), limit(30));
+      onSnapshot(q, snap => {
+        const notifs = snap.docs.map(d => d.data());
+        notifications = notifs;
+        localStorage.setItem('mithla_notifications', JSON.stringify(notifs));
+        if(typeof renderNotifDrawer==='function') renderNotifDrawer();
+        if(typeof updateNotifBadge==='function') updateNotifBadge();
+        // Show popup for newest unread
+        if(notifs.length && !notifs[0].read){
+          const newest = notifs[0];
+          const shown = sessionStorage.getItem('notif_shown_'+newest.id);
+          if(!shown){
+            sessionStorage.setItem('notif_shown_'+newest.id,'1');
+            if(typeof showNotifPopup==='function') showNotifPopup(newest);
+          }
+        }
+      }, err => console.warn('notif listen fail',err));
+    }
+
+    // ── EXPOSE to window so rest of JS can call ───────────────
+    window.FB = {
+      incrementView:  firebaseIncrementView,
+      listenViews:    firebaseListenViews,
+      saveLead:       firebaseSaveLead,
+      listenLeads:    firebaseListenLeads,
+      updateLeadStatus: firebaseUpdateLeadStatus,
+      saveLeadNote:   firebaseSaveLeadNote,
+      sendNotif:      firebaseSendNotification,
+      listenNotifs:   firebaseListenNotifications,
+    };
+
+    // ── AUTO START on DOM ready ───────────────────────────────
+    document.addEventListener('DOMContentLoaded', () => {
+      firebaseIncrementView();
+      firebaseListenViews();
+      firebaseListenLeads();
+      firebaseListenNotifications();
+    });
+  </script>
   <style>
     :root {
       --gold: #D4880A;
@@ -196,6 +342,20 @@
       text-align:center; padding:2rem;
       max-width:900px;
     }
+    .hero-views-bar {
+      display:inline-block;
+      background:rgba(255,255,255,0.1);
+      border:1px solid rgba(255,255,255,0.25);
+      color:rgba(255,255,255,0.9);
+      padding:0.3rem 1.2rem;
+      border-radius:20px;
+      font-size:0.78rem;
+      font-weight:600;
+      letter-spacing:0.5px;
+      margin-bottom:0.75rem;
+      animation: fadeInDown 0.6s ease both;
+    }
+    .hero-views-bar span { color:var(--gold); font-weight:800; }
     .hero-badge {
       display:inline-block;
       background:rgba(212,175,55,0.15);
@@ -212,11 +372,12 @@
     .hero h1 {
       font-family:'Playfair Display',serif;
       font-size:clamp(2.5rem,6vw,5rem);
-      font-weight:900; color:var(--white);
+      font-weight:900; color:#ffffff !important;
+      -webkit-text-fill-color:#ffffff !important;
       line-height:1.1; margin-bottom:1rem;
       animation: fadeInUp 0.9s ease 0.2s both;
     }
-    .hero h1 span { color:var(--gold); }
+    .hero h1 span { color:var(--gold) !important; -webkit-text-fill-color:var(--gold) !important; }
     .hero p {
       font-size:1.2rem; color:#FFE0B2;
       margin-bottom:2.5rem;
@@ -734,7 +895,79 @@
 
 
 
-    /* ===== TOAST ===== */
+    /* ===== FAQ ===== */
+    .faq-item {
+      background:white; border-radius:14px; margin-bottom:1rem;
+      overflow:hidden; cursor:pointer; transition:box-shadow 0.3s;
+      box-shadow:0 3px 15px rgba(0,0,0,0.07);
+      border-left:5px solid var(--mithila-red);
+    }
+    .faq-item:hover { box-shadow:0 8px 30px rgba(192,57,43,0.15); }
+    .faq-item.open { box-shadow:0 8px 30px rgba(192,57,43,0.2); }
+    .faq-q {
+      display:flex; justify-content:space-between; align-items:center;
+      padding:1.2rem 1.5rem; gap:1rem;
+      font-weight:700; font-size:1rem; color:var(--dark);
+    }
+    .faq-q span { flex:1; }
+    .faq-arrow { color:var(--mithila-red); font-size:0.9rem; flex-shrink:0; transition:transform 0.35s; }
+    .faq-item.open .faq-arrow { transform:rotate(180deg); }
+    .faq-a {
+      max-height:0; overflow:hidden;
+      transition:max-height 0.4s ease, padding 0.3s;
+      padding:0 1.5rem;
+      font-size:0.92rem; color:#555; line-height:1.8;
+    }
+    .faq-item.open .faq-a {
+      max-height:500px; padding:0.75rem 1.5rem 1.4rem;
+      border-top:1px solid #f0f0f0;
+    }
+    .faq-a ul { padding-left:1.2rem; }
+    .faq-a li { margin-bottom:0.2rem; }
+
+    /* ===== FOCUS MODE ===== */
+    .focus-back-bar {
+      display:none; position:sticky; top:70px; z-index:900;
+      background:var(--mithila-red); color:white;
+      padding:0.6rem 1.5rem; align-items:center; gap:0.75rem;
+      cursor:pointer; font-weight:700; font-size:0.9rem;
+      box-shadow:0 3px 15px rgba(0,0,0,0.2);
+    }
+    .focus-back-bar.show { display:flex; }
+    .focus-back-bar i { font-size:1.1rem; }
+    body.focus-mode .about-strip,
+    body.focus-mode .mithila-divider { display:none !important; }
+    body.focus-mode section:not(.hero):not(.focus-active) { display:none !important; }
+    body.focus-mode footer { display:none !important; }
+    body.focus-mode .focus-active { display:block !important; }
+    .focus-offer-badge {
+      display:inline-flex; align-items:center; gap:0.4rem;
+      background:linear-gradient(135deg,var(--mithila-red),#E65100);
+      color:white; font-size:0.72rem; font-weight:800;
+      padding:3px 10px; border-radius:20px;
+      animation: pulse 1.5s infinite;
+    }
+    .item-card.is-offer {
+      border:2px solid var(--mithila-red);
+      box-shadow:0 0 0 3px rgba(192,57,43,0.15);
+      order:-1;
+    }
+    /* ===== YOUTUBE CARDS ===== */
+    .yt-card { position:relative; }
+    .yt-play-btn {
+      position:absolute; top:50%; left:50%;
+      transform:translate(-50%,-60%) scale(1);
+      z-index:3; transition:transform 0.2s;
+      filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));
+      pointer-events:none;
+    }
+    .yt-card:hover .yt-play-btn { transform:translate(-50%,-60%) scale(1.15); }
+    .yt-badge {
+      position:absolute; top:10px; right:10px;
+      background:#ff0000; color:white;
+      font-size:0.7rem; font-weight:700;
+      padding:3px 8px; border-radius:4px; z-index:3;
+    }
     .toast {
       position:fixed; bottom:2rem; left:50%;
       transform:translateX(-50%) translateY(80px);
@@ -895,7 +1128,93 @@
     /* Rating card entry */
     .rating-card { transition:all 0.4s cubic-bezier(0.25,0.46,0.45,0.94); }
 
-    /* ===== MOBILE ===== */
+    /* ===== NOTIFICATION BELL ===== */
+    .notif-bell {
+      position:fixed; bottom:13.5rem; right:2rem; z-index:9998;
+      width:52px; height:52px; border-radius:50%;
+      background:linear-gradient(135deg,#1565C0,#0D47A1);
+      display:flex; align-items:center; justify-content:center;
+      cursor:pointer; box-shadow:0 4px 20px rgba(21,101,192,0.5);
+      transition:transform 0.2s;
+    }
+    .notif-bell:hover { transform:scale(1.1); }
+    .notif-bell i { font-size:1.4rem; color:white; }
+    .notif-badge {
+      position:absolute; top:-4px; right:-4px;
+      background:#e74c3c; color:white; font-size:0.65rem;
+      font-weight:700; min-width:18px; height:18px;
+      border-radius:9px; display:flex; align-items:center;
+      justify-content:center; padding:0 4px;
+      display:none;
+    }
+    .notif-badge.show { display:flex; animation:bellRing 0.6s ease; }
+    @keyframes bellRing {
+      0%,100%{transform:rotate(0)} 20%{transform:rotate(-15deg)}
+      40%{transform:rotate(15deg)} 60%{transform:rotate(-10deg)}
+      80%{transform:rotate(10deg)}
+    }
+    /* Notification Drawer */
+    .notif-drawer {
+      position:fixed; bottom:225px; right:24px; z-index:9997;
+      width:320px; background:white; border-radius:16px;
+      box-shadow:0 8px 40px rgba(0,0,0,0.18);
+      transform:scale(0.9) translateY(20px); opacity:0;
+      pointer-events:none; transition:all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+      overflow:hidden; max-height:420px;
+    }
+    .notif-drawer.open { transform:scale(1) translateY(0); opacity:1; pointer-events:all; }
+    .notif-drawer-head {
+      background:linear-gradient(135deg,#1565C0,#0D47A1);
+      padding:0.9rem 1.2rem; display:flex; align-items:center;
+      justify-content:space-between;
+    }
+    .notif-drawer-head h4 { color:white; font-size:0.95rem; margin:0; }
+    .notif-drawer-head span { color:rgba(255,255,255,0.7); font-size:0.75rem; cursor:pointer; }
+    .notif-list { overflow-y:auto; max-height:320px; padding:0.5rem; }
+    .notif-item {
+      display:flex; gap:0.75rem; padding:0.75rem;
+      border-radius:10px; margin-bottom:0.4rem;
+      background:#f8f9fa; cursor:pointer;
+      transition:background 0.15s; border-left:3px solid transparent;
+      position:relative;
+    }
+    .notif-item:hover { background:#e3f2fd; }
+    .notif-item.unread { background:#EFF6FF; border-left-color:#1565C0; }
+    .notif-item.unread::after {
+      content:''; position:absolute; top:10px; right:10px;
+      width:7px; height:7px; border-radius:50%; background:#1565C0;
+    }
+    .notif-icon { font-size:1.5rem; flex-shrink:0; }
+    .notif-text p { margin:0; font-size:0.82rem; font-weight:600; color:#1a1a1a; line-height:1.3; }
+    .notif-text span { font-size:0.72rem; color:#888; }
+    .notif-item.has-img { flex-direction:column; gap:0.5rem; }
+    .notif-item.has-img .notif-img-top { display:flex; gap:0.75rem; align-items:center; }
+    .notif-item-img { width:100%; border-radius:8px; display:block; object-fit:contain; background:#f0f0f0; max-height:200px; }
+    .notif-empty { text-align:center; padding:2rem; color:#aaa; font-size:0.85rem; }
+    .notif-popup {
+      position:fixed; top:90px; right:24px; z-index:99998;
+      width:300px; background:white; border-radius:14px;
+      box-shadow:0 6px 30px rgba(0,0,0,0.15);
+      padding:0; overflow:hidden;
+      transform:translateX(340px); opacity:0;
+      transition:all 0.4s cubic-bezier(0.34,1.56,0.64,1);
+      border-left:4px solid #1565C0;
+      display:flex; flex-direction:column;
+    }
+    .notif-popup.show { transform:translateX(0); opacity:1; }
+    .notif-popup-img-wrap { width:100%; display:none; }
+    .notif-popup-img-wrap img { width:100%; display:block; object-fit:contain; background:#111; max-height:180px; }
+    .notif-popup-row { display:flex; gap:0.75rem; align-items:flex-start; padding:0.85rem 1.1rem; }
+    .notif-popup-icon { font-size:1.5rem; flex-shrink:0; }
+    .notif-popup-body { flex:1; min-width:0; }
+    .notif-popup-body p { margin:0; font-size:0.83rem; font-weight:600; color:#1a1a1a; line-height:1.35; }
+    .notif-popup-body span { font-size:0.72rem; color:#888; }
+    .notif-popup-close { position:absolute; top:7px; right:9px; cursor:pointer; color:white; font-size:0.85rem; background:rgba(0,0,0,0.45); border-radius:50%; width:20px; height:20px; display:flex; align-items:center; justify-content:center; z-index:2; }
+    @media(max-width:480px){
+      .notif-drawer { width:calc(100vw - 32px); right:16px; }
+      .notif-popup { width:calc(100vw - 48px); right:16px; }
+      .notif-bell { bottom:13rem; right:16px; }
+    }
     @media(max-width:768px){
       nav { display:none; }
       nav.open {
@@ -1023,27 +1342,38 @@
     </a>
     <button class="hamburger" onclick="toggleNav()"><i class="fas fa-bars"></i></button>
     <nav id="mainNav">
-      <a href="#tent">Tent House</a>
-      <a href="#puja">🙏 Puja</a>
-      <a href="#banquet">Banquet</a>
-      <a href="#decoration">Decoration</a>
-      <a href="#latest">Latest Work</a>
-      <a href="#reviews">Reviews</a>
-      <a href="#contact">Contact</a>
+      <a href="#" onclick="exitFocusMode();return false;" style="font-size:0.8rem;opacity:0.8;">🏠</a>
+      <a href="#tent" onclick="focusSection('tent','🏕️ Tent House',event)">Tent House</a>
+      <a href="#puja" onclick="focusSection('puja','🙏 Puja & Bhagwat',event)">🙏 Puja</a>
+      <a href="#banquet" onclick="focusSection('banquet','🏛️ Banquet Hall',event)">Banquet</a>
+      <a href="#decoration" onclick="focusSection('decoration','🌸 Decoration',event)">Decoration</a>
+      <a href="#latest" onclick="focusSection('latest','📸 Latest Work',event)">Latest Work</a>
+      <a href="#reviews" onclick="focusSection('reviews','⭐ Reviews',event)">Reviews</a>
+      <a href="#faq" onclick="focusSection('faq','❓ FAQ',event)">FAQ</a>
+      <a href="#contact" onclick="focusSection('contact','📞 Contact',event)">Contact</a>
       <a href="#" class="nav-admin" onclick="showLogin(event)"><i class="fas fa-lock"></i> Admin</a>
     </nav>
   </div>
 </header>
 
+<!-- FOCUS MODE BACK BAR -->
+<div class="focus-back-bar" id="focusBackBar" onclick="exitFocusMode()">
+  <i class="fas fa-arrow-left"></i>
+  <span id="focusBackLabel">Wapas Jaao</span>
+  <span style="margin-left:auto;font-size:0.78rem;opacity:0.8;">← Poori website dekhne ke liye</span>
+</div>
+
 <!-- QUICK SECTION NAV (mobile only) -->
 <div class="quick-nav" id="quickNav">
-  <a href="#tent">🏕️ Tent</a>
-  <a href="#puja">🙏 Puja</a>
-  <a href="#banquet">🏛️ Banquet</a>
-  <a href="#decoration">🌸 Decor</a>
-  <a href="#latest">📸 Latest</a>
-  <a href="#reviews">⭐ Reviews</a>
-  <a href="#contact">📞 Contact</a>
+  <a href="#" onclick="exitFocusMode();return false;" style="font-size:0.8rem;">🏠</a>
+  <a href="#tent" onclick="focusSection('tent','🏕️ Tent House',event)">🏕️ Tent</a>
+  <a href="#puja" onclick="focusSection('puja','🙏 Puja',event)">🙏 Puja</a>
+  <a href="#banquet" onclick="focusSection('banquet','🏛️ Banquet',event)">🏛️ Banquet</a>
+  <a href="#decoration" onclick="focusSection('decoration','🌸 Decor',event)">🌸 Decor</a>
+  <a href="#latest" onclick="focusSection('latest','📸 Latest',event)">📸 Latest</a>
+  <a href="#reviews" onclick="focusSection('reviews','⭐ Reviews',event)">⭐ Reviews</a>
+  <a href="#faq" onclick="focusSection('faq','❓ FAQ',event)">❓ FAQ</a>
+  <a href="#contact" onclick="focusSection('contact','📞 Contact',event)">📞 Contact</a>
 </div>
 <div id="festivalBanner">
   <span id="bannerText">🎊 Special Offer! Book now and get 15% OFF on all tent house packages!</span>
@@ -1054,6 +1384,7 @@
 <section class="hero">
   <div class="hero-bg-pattern"></div>
   <div class="hero-content">
+    <div class="hero-views-bar">👁️ <span id="liveViewCount">0</span> log dekh chuke hain</div>
     <div class="hero-badge">🕉️ OM — TRUSTED SINCE 1990 — 🙏</div>
     <h1>Make Every Event<br><span>Unforgettable</span></h1>
     <p>Delhi ka No.1 Tent House, DJ & Sound, Lights & Decoration Service</p>
@@ -1073,7 +1404,7 @@
     </div>
     <div class="hero-btns">
       <a href="#contact" class="btn btn-gold"><i class="fas fa-calendar-check"></i> Book Now</a>
-      <a href="#tent" class="btn btn-outline"><i class="fas fa-eye"></i> View Services</a>
+      <a href="#tent" onclick="focusSection('tent','🏕️ Tent House',event)" class="btn btn-outline"><i class="fas fa-eye"></i> View Services</a>
     </div>
   </div>
   <div class="scroll-indicator" onclick="document.getElementById('tent').scrollIntoView()">
@@ -1299,9 +1630,15 @@
       </div>
       <div>
         <form id="contactForm" onsubmit="sendEmail(event)">
-          <div class="form-group">
-            <label>Aapka Naam *</label>
-            <input type="text" name="from_name" placeholder="Poora Naam" required>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Aapka Naam *</label>
+              <input type="text" name="from_name" placeholder="Poora Naam" required>
+            </div>
+            <div class="form-group">
+              <label>Phone Number *</label>
+              <input type="tel" name="phone" placeholder="e.g. 98765 43210" required>
+            </div>
           </div>
           <div class="form-row">
             <div class="form-group">
@@ -1359,6 +1696,29 @@
   </div>
 </section>
 
+<!-- FAQ SECTION -->
+<section class="section section-light" id="faq" style="padding:5rem 2rem;">
+  <div class="container">
+    <div class="section-head reveal" style="margin-bottom:3rem;">
+      <div class="section-tag">❓ SAWAAL JAWAAB</div>
+      <h2 class="section-title">Aksar Puche Jane Wale <span>Sawal</span></h2>
+      <p class="section-sub">Booking se pehle yeh common questions padhein — zyada doubt ho to call karein</p>
+    </div>
+    <div style="max-width:800px; margin:0 auto;" class="reveal">
+
+      <!-- FAQ items render here from localStorage via renderFaqSection() -->
+
+      <div style="text-align:center; margin-top:2.5rem;">
+        <p style="color:#888; margin-bottom:1rem; font-size:0.95rem;">Koi aur sawaal hai? Seedha baat karo!</p>
+        <a href="https://wa.me/919213402729?text=Namaste! Mujhe tent house booking ke baare mein kuch puchna tha." target="_blank" class="btn btn-gold" style="font-size:0.95rem;">
+          <i class="fab fa-whatsapp"></i> WhatsApp par Poochho
+        </a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
 <!-- FOOTER -->
 <footer>
   <div class="footer-grid">
@@ -1371,11 +1731,8 @@
         </div>
       </a>
       <p>Since 1990, Delhi ka sabse trusted Tent House, DJ &amp; Sound, Lights aur Decoration service. Making your special moments unforgettable.</p>
-      <div class="social-links">
-        <a href="#"><i class="fab fa-facebook"></i></a>
-        <a href="#"><i class="fab fa-instagram"></i></a>
-        <a href="#"><i class="fab fa-youtube"></i></a>
-        <a href="https://wa.me/919213402729" target="_blank"><i class="fab fa-whatsapp"></i></a>
+      <div class="social-links" id="footerSocialLinks">
+        <!-- Rendered by renderSocialLinks() -->
       </div>
     </div>
     <div class="footer-col">
@@ -1395,6 +1752,7 @@
       <ul>
         <li><a href="tel:+919213402729">+91 92134 02729</a></li>
         <li><a href="mailto:mithlalight@gmail.com">mithlalight@gmail.com</a></li>
+        <li><a href="#faq">FAQ</a></li>
         <li><a href="#contact">Book Now</a></li>
         <li><a href="#reviews">Reviews</a></li>
       </ul>
@@ -1419,12 +1777,45 @@
   <i class="fab fa-whatsapp"></i>
 </a>
 
+<!-- NOTIFICATION BELL -->
+<div class="notif-bell" onclick="toggleNotifDrawer()" title="Notifications">
+  <i class="fas fa-bell"></i>
+  <div class="notif-badge" id="notifBadge">0</div>
+</div>
+
+<!-- NOTIFICATION DRAWER -->
+<div class="notif-drawer" id="notifDrawer">
+  <div class="notif-drawer-head">
+    <h4>🔔 Notifications</h4>
+    <span onclick="markAllRead()">Mark all read ✓</span>
+  </div>
+  <div class="notif-list" id="notifList">
+    <div class="notif-empty">No notifications yet</div>
+  </div>
+</div>
+
+<!-- POPUP NOTIFICATION (top right) -->
+<div class="notif-popup" id="notifPopup">
+  <span class="notif-popup-close" onclick="closeNotifPopup()">✕</span>
+  <div class="notif-popup-img-wrap" id="notifPopupImgWrap">
+    <img id="notifPopupImg" src="" alt="offer">
+  </div>
+  <div class="notif-popup-row">
+    <div class="notif-popup-icon" id="notifPopupIcon">🔔</div>
+    <div class="notif-popup-body">
+      <p id="notifPopupTitle"></p>
+      <span id="notifPopupTime"></span>
+    </div>
+  </div>
+</div>
+
 <!-- DISCOUNT POPUP -->
 <div id="discountPopup" class="discount-popup">
   <button class="dp-close" onclick="closeDiscountPopup()">✕</button>
   <div class="dp-emoji" id="dpEmoji">🎁</div>
   <div class="dp-occasion" id="dpOccasion">Special Offer</div>
   <h2 class="dp-title">Badhai Ho! 🎊</h2>
+  <p class="dp-greeting" id="dpGreeting" style="font-size:0.9rem;color:#555;margin:0.3rem 0 0.5rem;text-align:center;font-style:italic;padding:0 1rem;"></p>
   <p class="dp-sub">Aapko mila ek khaas</p>
   <div class="dp-percent" id="dpPercent">15% OFF</div>
   <div class="dp-code" id="dpCode">MITHLA15</div>
@@ -1472,6 +1863,9 @@
       <button class="atab" onclick="switchTab('addLatest')">📸 Latest Work</button>
       <button class="atab" onclick="switchTab('addPuja')">🙏 Puja</button>
       <button class="atab" onclick="switchTab('festival')">🎉 Offer Banner</button>
+      <button class="atab" onclick="switchTab('notifications')">🔔 Notifications</button>
+      <button class="atab" onclick="switchTab('manageFaq')">❓ FAQ</button>
+      <button class="atab" onclick="switchTab('crmPanel')">👥 Customers</button>
       <button class="atab" onclick="switchTab('adminSettings')">⚙️ Settings</button>
     </div>
 
@@ -1575,8 +1969,16 @@
           <input type="text" id="lTag" placeholder="e.g. Wedding, Birthday, Corporate">
         </div>
         <div class="form-group">
-          <label>Image URL *</label>
-          <input type="url" id="lImage" placeholder="https://..." required>
+          <label>Image URL (optional agar YouTube ho)</label>
+          <input type="url" id="lImage" placeholder="https://...">
+        </div>
+        <div class="form-group" style="background:rgba(255,0,0,0.06);border:1.5px solid rgba(255,0,0,0.2);border-radius:12px;padding:1rem;">
+          <label style="color:#C62828;font-weight:700;">🎬 YouTube Video URL (optional)</label>
+          <input type="url" id="lYoutube" placeholder="https://youtube.com/watch?v=... ya https://youtu.be/...">
+          <small style="color:#888;font-size:0.75rem;display:block;margin-top:0.3rem;">
+            💡 Thumbnail automatically load hogi. Agar nahi dikhti to Image URL mein YouTube thumbnail link daalo:<br>
+            <code style="background:#f0f0f0;padding:2px 5px;border-radius:4px;font-size:0.7rem;">https://i.ytimg.com/vi/<b>VIDEO_ID</b>/hqdefault.jpg</code>
+          </small>
         </div>
         <input type="hidden" id="lEditId">
         <button type="submit" class="btn-submit" id="lSaveBtn">➕ Add Latest Work</button>
@@ -1613,35 +2015,232 @@
 
     <!-- FESTIVAL OFFER -->
     <div class="asection" id="festival">
+
+      <!-- ACTIVE FESTIVAL GIFT SETTINGS -->
+      <div style="background:linear-gradient(135deg,#1C0A00,#2a1000);border-radius:16px;padding:1.5rem;margin-bottom:1.5rem;border:1px solid rgba(212,175,55,0.3)">
+        <p style="font-weight:700;color:#FFD700;font-size:1rem;margin-bottom:0.25rem">🎉 Active Festival Gift Setting</p>
+        <p style="font-size:0.8rem;color:#aaa;margin-bottom:1rem">Yeh festival gift button khulne par dikhega. Aap jab chahein badal sakte ho.</p>
+        <div class="form-row">
+          <div class="form-group">
+            <label style="color:#FFE0B2">Festival Naam *</label>
+            <input type="text" id="festName" placeholder="e.g. Bakra Eid" style="background:#1C0A00;color:white;border-color:rgba(212,175,55,0.4)">
+          </div>
+          <div class="form-group">
+            <label style="color:#FFE0B2">Emoji *</label>
+            <input type="text" id="festEmoji" placeholder="e.g. 🐑" maxlength="4" style="background:#1C0A00;color:white;border-color:rgba(212,175,55,0.4)">
+          </div>
+        </div>
+        <div class="form-group">
+          <label style="color:#FFE0B2">Greeting Line (gift popup mein dikhega)</label>
+          <input type="text" id="festGreeting" placeholder="e.g. Bakra Eid Mubarak! Sabko tyohaar ki shubhkamnayein 🐑" style="background:#1C0A00;color:white;border-color:rgba(212,175,55,0.4)">
+        </div>
+        <div class="form-group">
+          <label style="color:#FFE0B2">Badge Color (hex)</label>
+          <div style="display:flex;gap:0.5rem;align-items:center;">
+            <input type="color" id="festColor" value="#2E7D32" style="width:50px;height:38px;border-radius:8px;border:none;cursor:pointer;background:transparent;">
+            <input type="text" id="festColorHex" value="#2E7D32" placeholder="#2E7D32" style="background:#1C0A00;color:white;border-color:rgba(212,175,55,0.4);flex:1">
+          </div>
+        </div>
+        <div class="form-group">
+          <label style="color:#FFE0B2">Valid Event Types (comma se alag karo)</label>
+          <input type="text" id="festEvents" placeholder="Shaadi/Wedding, Birthday, Puja, Party, Reception, Corporate, Anniversary, Engagement, Jagran, Bhagwat Katha" style="background:#1C0A00;color:white;border-color:rgba(212,175,55,0.4)">
+          <small style="color:#aaa;font-size:0.75rem">Default: sabhi events pe valid</small>
+        </div>
+        <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-top:0.5rem">
+          <button class="btn-submit" onclick="saveFestival()" style="flex:1">💾 Festival Save Karo</button>
+          <button class="btn-submit" onclick="clearFestival()" style="flex:1;background:#555;color:white;">🗑️ Clear Festival</button>
+        </div>
+        <div id="festPreview" style="display:none;margin-top:1rem;background:rgba(255,255,255,0.05);border-radius:10px;padding:0.75rem;text-align:center">
+          <p style="color:#aaa;font-size:0.75rem;margin-bottom:0.3rem">Preview:</p>
+          <span id="festPreviewBadge" style="display:inline-block;padding:4px 14px;border-radius:20px;font-size:0.85rem;font-weight:700;color:white;margin-bottom:4px"></span>
+          <p id="festPreviewGreeting" style="color:#FFE0B2;font-size:0.9rem;margin:0"></p>
+        </div>
+      </div>
+
+      <!-- QUICK FESTIVAL TEMPLATES -->
       <div style="background:#FFF8E1;border-radius:14px;padding:1.25rem;margin-bottom:1.5rem;">
-        <p style="font-weight:700;margin-bottom:0.5rem">🎁 Gift Button Discount Range</p>
-        <p style="font-size:0.83rem;color:#666;margin-bottom:0.75rem">Jab visitor gift button click kare to randomly in percentages mein se ek milega</p>
+        <p style="font-weight:700;margin-bottom:0.75rem">⚡ Quick Festival Templates</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;">
+          <button class="filter-btn" onclick="loadFestTpl('Bakra Eid','🐑','Bakra Eid Mubarak! Aapko tyohaar ki dheron shubhkamnayein','#2E7D32')">🐑 Bakra Eid</button>
+          <button class="filter-btn" onclick="loadFestTpl('Eid ul-Fitr','🌙','Eid Mubarak! Khushiyon aur barkatein aapke saath rahe','#1565C0')">🌙 Eid ul-Fitr</button>
+          <button class="filter-btn" onclick="loadFestTpl('Diwali','🪔','Diwali ki dheron shubhkamnayein! Prakash aur khushiyan aapke ghar aaye','#FF6B00')">🪔 Diwali</button>
+          <button class="filter-btn" onclick="loadFestTpl('Holi','🎨','Holi Mubarak! Rangon se bhara ye tyohaar aapke liye khushiyan laaye','#E91E63')">🎨 Holi</button>
+          <button class="filter-btn" onclick="loadFestTpl('New Year','🎆','Naye Saal ki Shubhkamnayein! Naya saal aapke liye sukhad ho','#6A1B9A')">🎆 New Year</button>
+          <button class="filter-btn" onclick="loadFestTpl('Christmas','🎄','Merry Christmas! Is tyohaar par aapka ghar khushiyon se bhara rahe','#C62828')">🎄 Christmas</button>
+          <button class="filter-btn" onclick="loadFestTpl('Navratri','🌸','Navratri ki Shubhkamnayein! Maa Durga ka aashirwaad aap par bana rahe','#FF8F00')">🌸 Navratri</button>
+          <button class="filter-btn" onclick="loadFestTpl('Janmashtami','🦚','Janmashtami ki Shubhkamnayein! Shri Krishna ka aashirwaad aap par rahe','#1B5E20')">🦚 Janmashtami</button>
+        </div>
+      </div>
+
+      <!-- GIFT DISCOUNT RANGE -->
+      <div style="background:#FFF8E1;border-radius:14px;padding:1.25rem;margin-bottom:1.5rem;">
+        <p style="font-weight:700;margin-bottom:0.5rem">🎁 Gift Discount Range</p>
+        <p style="font-size:0.83rem;color:#666;margin-bottom:0.75rem">Randomly in percentages mein se ek milega visitor ko</p>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem" id="percentBadges"></div>
         <div style="display:flex;gap:0.5rem;">
-          <input type="number" id="addPercent" placeholder="Add %" min="1" max="99" style="flex:1;padding:0.6rem;border:2px solid #ddd;border-radius:8px;font-family:Poppins,sans-serif">
+          <input type="number" id="addPercent" placeholder="Add % (max 50)" min="1" max="50" style="flex:1;padding:0.6rem;border:2px solid #ddd;border-radius:8px;font-family:Poppins,sans-serif">
           <button class="btn-edit" onclick="addDiscountPercent()" style="padding:0.6rem 1rem">Add %</button>
         </div>
       </div>
+
+      <!-- TEST BUTTON -->
       <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem;">
-        <button class="btn-submit" style="flex:1" onclick="triggerDiscount();showToast('Discount activated!','success')">🎁 Test Gift Button</button>
+        <button class="btn-submit" style="flex:1" onclick="triggerDiscount();showToast('Gift test ho raha hai!','success')">🎁 Test Gift Button</button>
         <button class="btn-submit" style="flex:1;background:#c62828;color:white;" onclick="clearDiscount()">✕ Clear Discount</button>
       </div>
+
+      <!-- TOP BANNER -->
       <hr style="margin:1.5rem 0;border-color:#eee">
+      <p style="font-weight:700;margin-bottom:0.5rem">📢 Top Offer Banner</p>
       <div class="form-group">
-        <label>Festival Banner Text</label>
         <input type="text" id="offerInput" placeholder="e.g. 🎊 Special Offer! Book now and get 15% OFF!">
       </div>
-      <div style="display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1.5rem;">
+      <div style="display:flex; gap:1rem; flex-wrap:wrap;">
         <button class="btn-submit" style="flex:1" onclick="showBanner()">🎉 Show Banner</button>
         <button class="btn-submit" style="flex:1; background:#c62828; color:white;" onclick="hideBanner()">✕ Hide Banner</button>
       </div>
-      <p style="font-weight:700; margin-bottom:0.75rem;">Quick Templates:</p>
-      <div style="display:flex; flex-direction:column; gap:0.5rem;">
-        <button class="filter-btn" onclick="setTpl('🪔 Diwali Special! Book now and get 20% OFF on all packages!')">🪔 Diwali</button>
-        <button class="filter-btn" onclick="setTpl('🎊 Eid Mubarak! Special discount on all tent house bookings!')">🌙 Eid</button>
-        <button class="filter-btn" onclick="setTpl('💍 Wedding Season Special! Free decoration on bookings above ₹50,000!')">💍 Wedding</button>
-        <button class="filter-btn" onclick="setTpl('🎆 New Year Offer! Free DJ upgrade on all bookings this week!')">🎆 New Year</button>
-        <button class="filter-btn" onclick="setTpl('🎂 Birthday Special! Book hall + decoration combo at 10% OFF!')">🎂 Birthday</button>
+    </div>
+
+    <!-- NOTIFICATIONS ADMIN -->
+    <div class="asection" id="notifications">
+      <div style="background:linear-gradient(135deg,#1565C0,#0D47A1);border-radius:16px;padding:1.5rem;margin-bottom:1.5rem;color:white">
+        <p style="font-weight:700;font-size:1rem;margin-bottom:0.25rem">🔔 Notification Bhejo</p>
+        <p style="font-size:0.8rem;opacity:0.8;margin-bottom:1rem">Visitors ko seedha notification aayega jab website khuli ho</p>
+        <div class="form-group">
+          <label style="color:#BBD7FF">Emoji</label>
+          <input type="text" id="nIcon" placeholder="e.g. 🎉 🪔 🎁 🔥" maxlength="4" value="🔔" style="background:rgba(255,255,255,0.1);color:white;border-color:rgba(255,255,255,0.3)">
+        </div>
+        <div class="form-group">
+          <label style="color:#BBD7FF">Message *</label>
+          <input type="text" id="nMsg" placeholder="e.g. Bakra Eid Special! Aaj book karo 20% OFF milega 🐑" style="background:rgba(255,255,255,0.1);color:white;border-color:rgba(255,255,255,0.3)">
+        </div>
+        <!-- Image upload -->
+        <div class="form-group">
+          <label style="color:#BBD7FF">📸 Offer Image (optional)</label>
+          <div id="nImgPreviewBox" style="display:none;margin-bottom:0.5rem;position:relative;width:fit-content">
+            <img id="nImgPreview" src="" alt="preview" style="max-height:100px;border-radius:8px;border:2px solid rgba(255,255,255,0.3);display:block;">
+            <button onclick="clearNotifImage()" style="position:absolute;top:-8px;right:-8px;background:#e53935;color:white;border:none;border-radius:50%;width:22px;height:22px;font-size:12px;cursor:pointer;font-weight:700;line-height:1">✕</button>
+          </div>
+          <label for="nImgFile" style="display:flex;align-items:center;gap:0.5rem;background:rgba(255,255,255,0.1);border:1px dashed rgba(255,255,255,0.4);border-radius:8px;padding:0.6rem 1rem;cursor:pointer;font-size:0.85rem;color:white;width:fit-content">
+            📁 Photo choose karo (gallery/camera)
+          </label>
+          <input type="file" id="nImgFile" accept="image/*" style="display:none" onchange="previewNotifImage(event)">
+          <small style="color:rgba(255,255,255,0.5);font-size:0.72rem;display:block;margin-top:0.3rem">JPG/PNG — phone se seedha photo le sakte ho</small>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label style="color:#BBD7FF">Type</label>
+            <select id="nType" style="background:rgba(255,255,255,0.1);color:white;border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:0.6rem;width:100%;font-family:Poppins,sans-serif">
+              <option value="offer">🏷️ Offer/Discount</option>
+              <option value="festival">🎉 Festival</option>
+              <option value="urgent">🔥 Urgent/Last Chance</option>
+              <option value="info">ℹ️ Info</option>
+              <option value="booking">📅 Booking Alert</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="color:#BBD7FF">Auto-dismiss (seconds)</label>
+            <input type="number" id="nDuration" value="6" min="3" max="30" style="background:rgba(255,255,255,0.1);color:white;border-color:rgba(255,255,255,0.3)">
+          </div>
+        </div>
+        <button class="btn-submit" onclick="sendNotification()" style="width:100%;background:white;color:#1565C0;font-weight:700">📤 Notification Bhejo</button>
+      </div>
+
+      <!-- Quick templates -->
+      <p style="font-weight:700;margin-bottom:0.75rem">⚡ Quick Templates</p>
+      <div style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:1.5rem">
+        <button class="filter-btn" onclick="loadNotifTpl('🐑','Bakra Eid Mubarak! Special discount sirf aaj ke liye — abhi book karo!','festival')">🐑 Bakra Eid</button>
+        <button class="filter-btn" onclick="loadNotifTpl('🔥','Sirf 2 dates baaki hain is month! Jaldi book karo.','urgent')">🔥 Last Dates</button>
+        <button class="filter-btn" onclick="loadNotifTpl('🎁','Gift button kholo — surprise discount aapka intezaar kar raha hai!','offer')">🎁 Gift Reminder</button>
+        <button class="filter-btn" onclick="loadNotifTpl('🪔','Diwali Special Package available hai! Limited time offer.','festival')">🪔 Diwali</button>
+        <button class="filter-btn" onclick="loadNotifTpl('📅','Aaj hi booking confirm karo — weekend dates bhar rahe hain!','booking')">📅 Booking Alert</button>
+        <button class="filter-btn" onclick="loadNotifTpl('🎊','Naya offer! Shaadi + DJ + Decoration combo par 15% OFF.','offer')">🎊 Combo Offer</button>
+      </div>
+
+      <!-- Sent history -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+        <p style="font-weight:700;margin:0">📋 Sent Notifications</p>
+        <button class="btn-del" onclick="clearAllNotifs()">🗑️ Sab Clear</button>
+      </div>
+      <div id="notifHistory" style="display:flex;flex-direction:column;gap:0.5rem"></div>
+    </div>
+
+    <!-- FAQ MANAGEMENT -->
+    <div class="asection" id="manageFaq">
+      <div class="info-box" style="margin-bottom:1.5rem;">
+        <p>❓ FAQ Manager</p>
+        <small>Naye sawal add karo, existing edit ya delete karo. Changes turant website par dikhenge.</small>
+      </div>
+
+      <!-- Add / Edit Form -->
+      <div style="background:#f9f9f9; border-radius:14px; padding:1.25rem; margin-bottom:1.5rem; border:2px dashed #ddd;" id="faqFormBox">
+        <p style="font-weight:700; margin-bottom:1rem;" id="faqFormTitle">➕ Naya Sawal Add Karo</p>
+        <div class="form-group">
+          <label>Sawal (Question) *</label>
+          <input type="text" id="faqQ" placeholder="e.g. 💰 Advance kitna dena hota hai?">
+        </div>
+        <div class="form-group">
+          <label>Jawab (Answer) *</label>
+          <textarea id="faqA" rows="4" placeholder="Yahan jawab likho..."></textarea>
+        </div>
+        <input type="hidden" id="faqEditId">
+        <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+          <button class="btn-submit" onclick="saveFaq()" style="flex:1; min-width:140px;" id="faqSaveBtn">➕ Add FAQ</button>
+          <button onclick="cancelFaqEdit()" id="faqCancelBtn" style="display:none; flex:1; min-width:140px; padding:0.75rem; border-radius:50px; border:2px solid #ddd; background:white; cursor:pointer; font-weight:600;">✕ Cancel</button>
+        </div>
+      </div>
+
+      <!-- FAQ List -->
+      <div id="faqAdminList"></div>
+    </div>
+
+    <!-- CRM PANEL -->
+    <div class="asection" id="crmPanel">
+
+      <!-- Stats row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin-bottom:1.5rem;">
+        <div style="background:linear-gradient(135deg,#1565C0,#0D47A1);border-radius:12px;padding:1rem;text-align:center;color:white;">
+          <div style="font-size:1.6rem;font-weight:800;" id="crmTotalViews">0</div>
+          <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">👁️ Total Views</div>
+        </div>
+        <div style="background:linear-gradient(135deg,#2E7D32,#1B5E20);border-radius:12px;padding:1rem;text-align:center;color:white;">
+          <div style="font-size:1.6rem;font-weight:800;" id="crmTotalLeads">0</div>
+          <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">📋 Inquiries</div>
+        </div>
+        <div style="background:linear-gradient(135deg,#E65100,#BF360C);border-radius:12px;padding:1rem;text-align:center;color:white;">
+          <div style="font-size:1.6rem;font-weight:800;" id="crmTodayViews">0</div>
+          <div style="font-size:0.72rem;opacity:0.85;margin-top:2px;">📅 Aaj ke Views</div>
+        </div>
+      </div>
+
+      <!-- Filter + Search -->
+      <div style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap;">
+        <input type="text" id="crmSearch" placeholder="🔍 Naam ya phone se dhundo..." oninput="renderCRM()" style="flex:1;min-width:150px;padding:0.55rem 0.9rem;border-radius:50px;border:1.5px solid #ddd;font-size:0.85rem;font-family:Poppins,sans-serif;">
+        <select id="crmFilter" onchange="renderCRM()" style="padding:0.55rem 0.75rem;border-radius:50px;border:1.5px solid #ddd;font-size:0.82rem;font-family:Poppins,sans-serif;">
+          <option value="all">Sab</option>
+          <option value="new">🆕 Naye</option>
+          <option value="contacted">✅ Contacted</option>
+          <option value="booked">🎉 Booked</option>
+        </select>
+        <button onclick="clearAllCRM()" class="btn-del" style="border-radius:50px;padding:0.55rem 0.9rem;font-size:0.8rem;">🗑️ Clear All</button>
+      </div>
+
+      <!-- Customer list -->
+      <div id="crmList"></div>
+
+      <!-- WA Bulk message -->
+      <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:14px;padding:1.1rem;margin-top:1rem;">
+        <p style="font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">📤 WhatsApp par Offer Bhejo</p>
+        <textarea id="crmBulkMsg" rows="3" placeholder="e.g. Namaste {naam}! Mithla ka naya offer: DJ + Disco Light combo par 20% OFF. Aaj hi book karo! 🎉" style="width:100%;border-radius:10px;border:1.5px solid #ddd;padding:0.6rem 0.8rem;font-size:0.83rem;font-family:Poppins,sans-serif;resize:vertical;box-sizing:border-box;"></textarea>
+        <small style="color:#888;font-size:0.75rem;">{naam} likhne se customer ka naam auto fill hoga</small>
+        <div style="display:flex;gap:0.5rem;margin-top:0.6rem;flex-wrap:wrap;">
+          <button onclick="sendBulkWA('all')" style="flex:1;background:#25D366;color:white;border:none;border-radius:50px;padding:0.6rem 1rem;font-weight:700;cursor:pointer;font-size:0.82rem;font-family:Poppins,sans-serif;">
+            <i class="fab fa-whatsapp"></i> Sab ko Bhejo
+          </button>
+          <button onclick="sendBulkWA('new')" style="flex:1;background:#128C7E;color:white;border:none;border-radius:50px;padding:0.6rem 1rem;font-weight:700;cursor:pointer;font-size:0.82rem;font-family:Poppins,sans-serif;">
+            <i class="fab fa-whatsapp"></i> Sirf Naye Ko
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1669,6 +2268,24 @@
         <label>WhatsApp Number (with country code)</label>
         <input type="text" id="sWA" value="919213402729">
       </div>
+
+      <!-- SOCIAL LINKS -->
+      <div style="background:#f9f9f9;border-radius:14px;padding:1.25rem;margin:1rem 0;border:1.5px dashed #ddd;">
+        <p style="font-weight:700;margin-bottom:1rem;">📱 Social Media Links</p>
+        <div class="form-group">
+          <label><i class="fab fa-facebook" style="color:#1877F2;margin-right:6px;"></i>Facebook Page URL</label>
+          <input type="url" id="sFacebook" placeholder="https://facebook.com/yourpage">
+        </div>
+        <div class="form-group">
+          <label><i class="fab fa-instagram" style="color:#E1306C;margin-right:6px;"></i>Instagram Profile URL</label>
+          <input type="url" id="sInstagram" placeholder="https://instagram.com/yourprofile">
+        </div>
+        <div class="form-group">
+          <label><i class="fab fa-youtube" style="color:#FF0000;margin-right:6px;"></i>YouTube Channel URL</label>
+          <input type="url" id="sYoutube" placeholder="https://youtube.com/@yourchannel">
+        </div>
+      </div>
+
       <div class="form-group">
         <label>New Admin Password (leave blank to keep)</label>
         <input type="password" id="sNewPass" placeholder="New password">
@@ -1697,6 +2314,19 @@ let reviews = JSON.parse(localStorage.getItem('mithla_reviews') || '[]');
 let pujaItems = JSON.parse(localStorage.getItem('mithla_puja') || '[]');
 let settings = JSON.parse(localStorage.getItem('mithla_settings') || '{}');
 let selectedRating = 5;
+
+// ===== FAQ DATA =====
+const DEFAULT_FAQS = [
+  {id:1, q:'💰 Advance kitna dena hota hai booking ke time?', a:'Booking confirm karne ke liye total amount ka 25–30% advance dena hota hai. Yeh advance aapki date pakki kar deta hai aur baaki payment event se 1 din pehle ya event ke din kar sakte hain. Advance cash, UPI (GPay/PhonePe/Paytm) — sabhi tarike se le lete hain.'},
+  {id:2, q:'❌ Agar event cancel ho jaye to kya hoga?', a:'Event se 15+ din pehle cancel: Poora advance refund milega.\nEvent se 7–14 din pehle cancel: 50% advance refund milega.\nEvent se 7 din ke andar cancel: Advance refund nahi hoga.\nDate change: Agar nai date available hai to ek baar free mein date badal sakte hain.'},
+  {id:3, q:'🚚 Transport aur delivery charge kitna lagta hai?', a:'Delhi NCR (0–15 km): ₹500 – ₹1,000\n15–30 km: ₹1,000 – ₹2,000\n30–50 km (Ghaziabad, Noida, Faridabad): ₹2,000 – ₹3,500\n50 km se zyada: Alag se baat karein — negotiable hai.\nSetup aur removal dono included hain transport charge mein.'},
+  {id:4, q:'📍 Aap kahan kahan service dete ho?', a:'Hum in areas mein service dete hain: Delhi (Sabhi areas), Ghaziabad, Noida / Greater Noida, Faridabad, Gurugram, aur baki NCR areas ke liye call karein.'},
+  {id:5, q:'🏗️ Tent setup mein kitna time lagta hai?', a:'Chota tent (50x50 tak): 3–4 ghante\nMedium tent (50x100): 5–7 ghante\nBada tent (100x100+): 1 din pehle se setup shuru\nHum event se 1 din pehle setup karte hain taaki sab kuch time se ready rahe.'},
+  {id:6, q:'🎵 Kya DJ aur Sound alag book kar sakte hain tent ke bina?', a:'Haan, bilkul! Sirf DJ Service, Sirf Sound System, Sirf Lighting Decoration, Sirf Tent House — ya sab ek saath combo mein discount milta hai.'},
+  {id:7, q:'📞 Last minute booking ho sakti hai?', a:'Hum koshish karte hain ki aapki zaroorat puri ho! Agar 2–3 din pehle booking karo to availability check karke batate hain. Peak season (Oct–Feb) mein pehle se book karna better rahega.'},
+];
+let faqItems = JSON.parse(localStorage.getItem('mithla_faq') || 'null');
+if(!faqItems){ faqItems = DEFAULT_FAQS; localStorage.setItem('mithla_faq', JSON.stringify(faqItems)); }
 
 if(pujaItems.length === 0){
   pujaItems = [
@@ -1748,10 +2378,13 @@ function init(){
   renderLatest();
   renderPuja();
   renderReviews();
+  renderFaqSection();
+  renderSocialLinks();
   counterAnimation();
   initScrollReveal();
   restoreBanner();
   initDiscount();
+  initNotifications();
 }
 
 // ===== PARTICLES =====
@@ -1771,16 +2404,37 @@ function createParticles(){
 // ===== COUNTER =====
 function counterAnimation(){
   const counters = document.querySelectorAll('.stat-num');
-  counters.forEach(c => {
-    const target = parseInt(c.dataset.target);
-    let current = 0;
-    const step = target / 60;
-    const timer = setInterval(() => {
-      current += step;
-      if(current >= target){ c.textContent = target + (target===98?'':''); clearInterval(timer); }
-      else c.textContent = Math.floor(current);
-    }, 30);
-  });
+  // Pehle sab 0 dikhao
+  counters.forEach(c => { c.textContent = '0'; });
+
+  // Jab hero stats screen pe aaye tab shuru karo
+  const statsEl = document.querySelector('.hero-stats');
+  if(!statsEl) return;
+
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if(!entry.isIntersecting) return;
+      obs.disconnect(); // sirf ek baar
+      setTimeout(() => {
+        counters.forEach(c => {
+          const target = parseInt(c.dataset.target);
+          const duration = 2500;
+          let startTime = null;
+          function easeOut(t){ return 1 - Math.pow(1-t, 3); }
+          function step(timestamp){
+            if(!startTime) startTime = timestamp;
+            const progress = Math.min((timestamp - startTime) / duration, 1);
+            c.textContent = Math.floor(easeOut(progress) * target);
+            if(progress < 1) requestAnimationFrame(step);
+            else c.textContent = target + (target===98 ? '%' : '+');
+          }
+          requestAnimationFrame(step);
+        });
+      }, 800); // 0.8s delay after visible
+    });
+  }, { threshold: 0.5 });
+
+  obs.observe(statsEl);
 }
 
 // ===== SCROLL REVEAL =====
@@ -1858,16 +2512,41 @@ function renderLatest(){
     grid.innerHTML = '<p style="color:#aaa;text-align:center;grid-column:1/-1;padding:3rem">No latest work added yet. Add from Admin Panel.</p>';
     return;
   }
-  grid.innerHTML = latestItems.map(l => `
-    <div class="decor-card">
-      ${l.image ? `<img src="${l.image}" alt="${l.title}" onerror="this.style.display='none'">` : '<div class="no-img-bg">📸</div>'}
+  grid.innerHTML = latestItems.map(l => {
+    const isYT = !!l.youtube;
+    const link = isYT ? `https://www.youtube.com/watch?v=${l.youtube}` : null;
+
+    // Try multiple thumbnail qualities with fallback chain
+    const ytThumbHQ  = `https://i.ytimg.com/vi/${l.youtube}/hqdefault.jpg`;
+    const ytThumbMQ  = `https://i.ytimg.com/vi/${l.youtube}/mqdefault.jpg`;
+    const ytThumbSD  = `https://i.ytimg.com/vi/${l.youtube}/sddefault.jpg`;
+
+    const imgSrc = isYT ? ytThumbHQ : l.image;
+
+    return `
+    <div class="decor-card latest-card${isYT?' yt-card':''}"
+      ${link ? `onclick="window.open('${link}','_blank')" style="cursor:pointer;"` : ''}>
+      ${isYT ? `
+        <img src="${ytThumbHQ}"
+          onerror="this.src='${ytThumbMQ}';this.onerror=function(){this.src='${ytThumbSD}';this.onerror=function(){this.style.display='none';this.nextElementSibling.style.display='flex';}}"
+          alt="${l.title}" style="width:100%;height:100%;object-fit:cover;">
+        <div style="display:none;width:100%;height:100%;background:#111;align-items:center;justify-content:center;position:absolute;top:0;left:0;">
+          <svg viewBox="0 0 68 48" width="68" height="48"><path d="M66.5 7.7A8.5 8.5 0 0 0 60.2 1C54.9 0 34 0 34 0S13.1 0 7.8 1A8.5 8.5 0 0 0 1.5 7.7C0 13 0 24 0 24s0 11 1.5 16.3A8.5 8.5 0 0 0 7.8 47C13.1 48 34 48 34 48s20.9 0 26.2-1a8.5 8.5 0 0 0 6.3-6.7C68 35 68 24 68 24S68 13 66.5 7.7z" fill="#ff0000"/><path d="M27 34l18-10-18-10z" fill="white"/></svg>
+        </div>
+        <div class="yt-play-btn">
+          <svg viewBox="0 0 68 48" width="52" height="36"><path d="M66.5 7.7A8.5 8.5 0 0 0 60.2 1C54.9 0 34 0 34 0S13.1 0 7.8 1A8.5 8.5 0 0 0 1.5 7.7C0 13 0 24 0 24s0 11 1.5 16.3A8.5 8.5 0 0 0 7.8 47C13.1 48 34 48 34 48s20.9 0 26.2-1a8.5 8.5 0 0 0 6.3-6.7C68 35 68 24 68 24S68 13 66.5 7.7z" fill="#ff0000"/><path d="M27 34l18-10-18-10z" fill="white"/></svg>
+        </div>
+        <div class="yt-badge">▶ YouTube</div>
+      ` : `
+        ${l.image ? `<img src="${l.image}" alt="${l.title}" onerror="this.style.display='none'">` : '<div class="no-img-bg">📸</div>'}
+      `}
       <div class="decor-overlay">
         ${l.tag ? `<span class="decor-tag">${l.tag}</span>` : ''}
         <div class="decor-title">${l.title}</div>
         ${l.desc ? `<div class="decor-sub">${l.desc}</div>` : ''}
       </div>
     </div>
-  `).join('');
+  `}).join('');
 }
 
 function renderReviews(){
@@ -1915,10 +2594,26 @@ function sendEmail(e){
   e.preventDefault();
   const btn = document.getElementById('submitBtn');
   
-  const name = e.target.from_name ? e.target.from_name.value : '';
-  const eventType = e.target.eventType ? e.target.eventType.value : '';
-  const eventDate = e.target.eventDate ? e.target.eventDate.value : '';
-  const message = e.target.message ? e.target.message.value : '';
+  const name     = e.target.from_name ? e.target.from_name.value.trim() : '';
+  const phone    = e.target.phone     ? e.target.phone.value.trim()     : '';
+  const eventType= e.target.eventType ? e.target.eventType.value        : '';
+  const eventDate= e.target.eventDate ? e.target.eventDate.value        : '';
+  const message  = e.target.message   ? e.target.message.value.trim()   : '';
+
+  // ===== SAVE TO CRM (localStorage + Firebase) =====
+  const leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  const newLead = {
+    id: Date.now(),
+    name, phone, eventType, eventDate, message,
+    status: 'new',
+    time: new Date().toLocaleString('en-IN',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}),
+    note: ''
+  };
+  leads.unshift(newLead);
+  if(leads.length > 200) leads.length = 200;
+  localStorage.setItem('mithla_leads', JSON.stringify(leads));
+  // Firebase save
+  if(window.FB) window.FB.saveLead(newLead);
 
   // Check active discount
   const discountInfo = activeDiscount ? `\n🎁 Discount Code: ${activeDiscount.code} (${activeDiscount.percent}% OFF)` : '';
@@ -1927,6 +2622,7 @@ function sendEmail(e){
 
 *Naya Inquiry:*
 👤 Naam: ${name}
+📞 Phone: ${phone}
 🎉 Event: ${eventType}
 📅 Date: ${eventDate || 'Not specified'}
 💬 Message: ${message}${discountInfo}
@@ -2058,71 +2754,143 @@ function deletePuja(id){
 
 // ===== DISCOUNT SYSTEM =====
 let activeDiscount = JSON.parse(localStorage.getItem('mithla_discount') || 'null');
-let discountPercents = JSON.parse(localStorage.getItem('mithla_discount_range') || '[5,10,15,20,25]');
+let discountPercents = JSON.parse(localStorage.getItem('mithla_discount_range') || '[5,8,10,12,15,18,20,25]');
+// Auto-clean any out-of-range values (e.g. 5000, 98)
+discountPercents = discountPercents.filter(x => x >= 1 && x <= 50);
+if(discountPercents.length === 0) discountPercents = [5,8,10,12,15,18,20,25];
+localStorage.setItem('mithla_discount_range', JSON.stringify(discountPercents));
 
 function initDiscount(){
   // no bar needed
 }
 
-// Festival occasions — admin can update via settings
-const OCCASIONS = [
-  { name:'Diwali Special', emoji:'🪔', color:'#FF6B00' },
-  { name:'Holi Offer',     emoji:'🎨', color:'#E91E63' },
-  { name:'Eid Mubarak',    emoji:'🌙', color:'#2E7D32' },
-  { name:'New Year',       emoji:'🎆', color:'#1565C0' },
-  { name:'Wedding Season', emoji:'💍', color:'#880E4F' },
-  { name:'Birthday Blast', emoji:'🎂', color:'#E65100' },
-  { name:'Special Gift',   emoji:'🎁', color:'#6A1B9A' },
-];
+// ===== FESTIVAL GIFT SYSTEM =====
+function getActiveFestival(){
+  const saved = localStorage.getItem('mithla_active_festival');
+  if(saved) return JSON.parse(saved);
+  return null;
+}
+
+function saveFestival(){
+  const name = document.getElementById('festName').value.trim();
+  const emoji = document.getElementById('festEmoji').value.trim();
+  const greeting = document.getElementById('festGreeting').value.trim();
+  const color = document.getElementById('festColorHex').value.trim() || '#D4880A';
+  const eventsRaw = document.getElementById('festEvents').value.trim();
+  if(!name){ showToast('Festival naam likhna zaroori hai!','error'); return; }
+  const eventsArr = eventsRaw ? eventsRaw.split(',').map(e=>e.trim()).filter(Boolean)
+    : ['Shaadi/Wedding','Birthday','Puja','Party','Reception','Corporate','Anniversary','Engagement','Jagran','Bhagwat Katha'];
+  const fest = { name, emoji: emoji||'🎉', greeting: greeting||(name+' ki Shubhkamnayein! Mithla Tent par aapka swaagat hai.'), color, events: eventsArr };
+  localStorage.setItem('mithla_active_festival', JSON.stringify(fest));
+  showToast('Festival save ho gaya! Gift button ab '+name+' dikhayega 🎉','success');
+  renderFestPreview(fest);
+}
+
+function clearFestival(){
+  localStorage.removeItem('mithla_active_festival');
+  document.getElementById('festName').value='';
+  document.getElementById('festEmoji').value='';
+  document.getElementById('festGreeting').value='';
+  document.getElementById('festColorHex').value='#D4880A';
+  document.getElementById('festColor').value='#D4880A';
+  document.getElementById('festEvents').value='';
+  document.getElementById('festPreview').style.display='none';
+  showToast('Festival clear ho gaya. Ab generic discount dikhega.','error');
+}
+
+function loadFestTpl(name,emoji,greeting,color){
+  document.getElementById('festName').value=name;
+  document.getElementById('festEmoji').value=emoji;
+  document.getElementById('festGreeting').value=greeting;
+  document.getElementById('festColorHex').value=color;
+  document.getElementById('festColor').value=color;
+  const def = 'Shaadi/Wedding, Birthday, Puja, Party, Reception, Corporate, Anniversary, Engagement, Jagran, Bhagwat Katha';
+  document.getElementById('festEvents').value=def;
+  renderFestPreview({name,emoji,greeting,color,events:[]});
+  showToast(emoji+' '+name+' template load ho gaya!','success');
+}
+
+function renderFestPreview(fest){
+  document.getElementById('festPreview').style.display='block';
+  const badge = document.getElementById('festPreviewBadge');
+  badge.textContent = fest.emoji+' '+fest.name;
+  badge.style.background = fest.color;
+  document.getElementById('festPreviewGreeting').textContent = fest.greeting;
+}
+
+// Sync color picker <-> hex input
+document.addEventListener('DOMContentLoaded',()=>{
+  const cp = document.getElementById('festColor');
+  const hx = document.getElementById('festColorHex');
+  if(cp && hx){
+    cp.addEventListener('input',()=>{ hx.value=cp.value; });
+    hx.addEventListener('input',()=>{ if(/^#[0-9a-fA-F]{6}$/.test(hx.value)) cp.value=hx.value; });
+  }
+  // Load saved festival into form
+  const fest = getActiveFestival();
+  if(fest){
+    if(document.getElementById('festName')) document.getElementById('festName').value=fest.name;
+    if(document.getElementById('festEmoji')) document.getElementById('festEmoji').value=fest.emoji;
+    if(document.getElementById('festGreeting')) document.getElementById('festGreeting').value=fest.greeting;
+    if(document.getElementById('festColorHex')) document.getElementById('festColorHex').value=fest.color;
+    if(document.getElementById('festColor')) document.getElementById('festColor').value=fest.color;
+    if(document.getElementById('festEvents')) document.getElementById('festEvents').value=(fest.events||[]).join(', ');
+    renderFestPreview(fest);
+  }
+});
 
 function triggerDiscount(){
-  // 1 per day check — admin "Test Gift Button" bypass karo
-  const isAdminTest = document.getElementById('adminWrap') && document.getElementById('adminWrap').style.display !== 'none';
+  // 1 per day check — admin bypass
+  const isAdminTest = document.getElementById('adminWrap') && document.getElementById('adminWrap').classList.contains('active');
   if(!isAdminTest){
     const today = new Date().toDateString();
     const lastUsed = localStorage.getItem('mithla_gift_used');
     if(lastUsed === today){
-      showToast('🎁 Aaj aap pehle hi gift khhol chuke ho! Kal dobara aana.', 'error');
+      showToast('🎁 Aaj aap pehle hi gift khol chuke ho! Kal dobara aana.', 'error');
       return;
     }
     localStorage.setItem('mithla_gift_used', today);
   }
 
-  const percents = discountPercents;
-  const percent = percents[Math.floor(Math.random()*percents.length)];
+  const percent = discountPercents[Math.floor(Math.random()*discountPercents.length)];
   const code = 'MITHLA' + percent;
 
-  // Pick occasion based on saved festival or random
-  const savedBanner = localStorage.getItem('mithla_banner') || '';
-  let occasion = OCCASIONS[Math.floor(Math.random()*OCCASIONS.length)];
-  // Try to match saved festival banner text
-  if(savedBanner.toLowerCase().includes('diwali')) occasion = OCCASIONS[0];
-  else if(savedBanner.toLowerCase().includes('holi'))  occasion = OCCASIONS[1];
-  else if(savedBanner.toLowerCase().includes('eid'))   occasion = OCCASIONS[2];
-  else if(savedBanner.toLowerCase().includes('new year')) occasion = OCCASIONS[3];
-  else if(savedBanner.toLowerCase().includes('wedding'))  occasion = OCCASIONS[4];
-  else if(savedBanner.toLowerCase().includes('birthday')) occasion = OCCASIONS[5];
+  // Get active festival from admin setting
+  const fest = getActiveFestival();
+  const occasion = fest
+    ? { name: fest.name, emoji: fest.emoji, greeting: fest.greeting, color: fest.color, events: fest.events }
+    : { name:'Special Gift', emoji:'🎁', greeting:'MITHLA Tent Light DJ & Sound ki taraf se aapko yeh khaas gift mila!', color:'#D4880A',
+        events:['Shaadi/Wedding','Birthday','Puja','Party','Reception','Corporate','Anniversary','Engagement'] };
 
   activeDiscount = { percent, code, occasion: occasion.name };
   localStorage.setItem('mithla_discount', JSON.stringify(activeDiscount));
 
-  // Update popup content
+  // Update popup
   document.getElementById('dpPercent').textContent = percent + '% OFF';
   document.getElementById('dpCode').textContent = code;
   document.getElementById('dpEmoji').textContent = occasion.emoji;
   document.getElementById('dpOccasion').textContent = occasion.name;
-  document.getElementById('dpOccasion').style.background = `linear-gradient(135deg, ${occasion.color}, ${occasion.color}cc)`;
+  document.getElementById('dpOccasion').style.background = `linear-gradient(135deg, ${occasion.color}, ${occasion.color}bb)`;
+  document.getElementById('dpGreeting').textContent = occasion.greeting;
 
-  // Fill event tags
-  const events = ['Shaadi/Wedding','Birthday','Corporate','Anniversary','Engagement'];
+  // Event tags
   const tagsEl = document.getElementById('dpEventTags');
-  if(tagsEl) tagsEl.innerHTML = events.map(e=>`<span class="dp-event-tag">${e}</span>`).join('');
+  if(tagsEl) tagsEl.innerHTML = occasion.events.map(e=>`<span class="dp-event-tag">${e}</span>`).join('');
 
-  // Show popup
+  // Confetti colors — festival themed
+  const festColors = {
+    'Holi':     ['#FF6B6B','#FF9800','#FFEB3B','#4CAF50','#2196F3','#E91E63','#9C27B0'],
+    'Diwali':   ['#FFD700','#FF6B00','#FF8E53','#FFC107','#FF5722','#FFEB3B','#ffffff'],
+    'Eid':      ['#2E7D32','#81C784','#A5D6A7','#FFD700','#FFFFFF','#1B5E20','#C8E6C9'],
+    'Bakra Eid':['#2E7D32','#81C784','#FFD700','#FFFFFF','#A5D6A7','#388E3C','#C8E6C9'],
+    'Christmas':['#C62828','#FFFFFF','#2E7D32','#FFD700','#EF9A9A','#A5D6A7'],
+    'Navratri': ['#FF8F00','#E91E63','#FF5722','#FFD700','#9C27B0','#F06292'],
+  };
+  const matchKey = Object.keys(festColors).find(k => occasion.name.toLowerCase().includes(k.toLowerCase()));
+  window._confettiColors = matchKey ? festColors[matchKey] : null;
+
   document.getElementById('discountOverlay').classList.add('active');
   document.getElementById('discountPopup').classList.add('active');
-
-  // Fire confetti!
   fireConfetti();
 }
 
@@ -2134,7 +2902,9 @@ function closeDiscountPopup(){
 function shareDiscount(){
   if(!activeDiscount) return;
   const wa = settings.whatsapp || WA_NUM;
-  const msg = `Mujhe MITHLA TENT LIGHT DJ &amp; SOUND se ${activeDiscount.percent}% discount mila! 🎁\nCode: ${activeDiscount.code}\nAb book karta hoon!`;
+  const fest = getActiveFestival();
+  const festLine = fest ? `\n🎉 ${fest.name} Special Offer!` : '';
+  const msg = `Mujhe MITHLA TENT LIGHT DJ & SOUND se ${activeDiscount.percent}% discount mila! 🎁${festLine}\nCode: ${activeDiscount.code}\nAb book karta hoon!`;
   window.open(`https://wa.me/${wa}?text=${encodeURIComponent(msg)}`, '_blank');
   closeDiscountPopup();
 }
@@ -2154,21 +2924,22 @@ function fireConfetti(){
   const originX = rect.left + rect.width / 2;
   const originY = rect.top + rect.height / 2;
 
-  const colors = [
+  const colors = window._confettiColors || [
     '#FFD700','#FF6B6B','#FF8E53','#4CAF50',
     '#2196F3','#E91E63','#9C27B0','#00BCD4',
     '#FF5722','#8BC34A','#FFC107','#ffffff'
   ];
+  window._confettiColors = null;
 
   // Paper shapes: rect, circle, triangle, ribbon
   const shapes = ['rect','rect','rect','circle','ribbon','triangle'];
 
   const pieces = [];
-  const COUNT = 220;
+  const COUNT = 130;
 
   for(let i = 0; i < COUNT; i++){
     const angle = (Math.random() * Math.PI * 2);
-    const speed = Math.random() * 18 + 8;
+    const speed = Math.random() * 22 + 12;
     const shape = shapes[Math.floor(Math.random()*shapes.length)];
     pieces.push({
       x: originX,
@@ -2180,7 +2951,7 @@ function fireConfetti(){
       color: colors[Math.floor(Math.random()*colors.length)],
       rotation: Math.random() * 360,
       rotSpeed: Math.random() * 12 - 6,
-      gravity: 0.45 + Math.random()*0.2,
+      gravity: 0.7 + Math.random()*0.35,
       drag: 0.97,
       opacity: 1,
       shape: shape,
@@ -2221,7 +2992,7 @@ function fireConfetti(){
       p.x += Math.sin(p.wobbleAngle) * 0.8;
 
       // Fade out after peak
-      if(frame > 40) p.opacity -= 0.035;
+      if(frame > 20) p.opacity -= 0.055;
 
       if(p.opacity <= 0) return;
 
@@ -2262,13 +3033,218 @@ function fireConfetti(){
     });
 
     frame++;
-    if(frame < 85) requestAnimationFrame(animate);
+    if(frame < 55) requestAnimationFrame(animate);
     else {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
   }
   animate();
 }
+
+// ===== NOTIFICATION SYSTEM =====
+let notifications = JSON.parse(localStorage.getItem('mithla_notifications') || '[]');
+let notifDrawerOpen = false;
+let notifPopupTimer = null;
+let lastNotifCount = notifications.length;
+
+function initNotifications(){
+  renderNotifDrawer();
+  updateNotifBadge();
+  // Show latest unread popup on page load (after 3s)
+  const unread = notifications.filter(n=>!n.read);
+  if(unread.length > 0){
+    setTimeout(()=> showNotifPopup(unread[0]), 3000);
+  }
+  // Poll every 5s — if admin adds new notification, all visitors get it
+  setInterval(()=>{
+    const latest = JSON.parse(localStorage.getItem('mithla_notifications') || '[]');
+    if(latest.length > lastNotifCount){
+      const newOnes = latest.slice(0, latest.length - lastNotifCount);
+      notifications = latest;
+      lastNotifCount = latest.length;
+      renderNotifDrawer();
+      updateNotifBadge();
+      showNotifPopup(newOnes[0]);
+    }
+  }, 5000);
+}
+
+// ===== NOTIFICATION IMAGE =====
+let notifImageBase64 = null;
+
+function previewNotifImage(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev){
+    notifImageBase64 = ev.target.result;
+    document.getElementById('nImgPreview').src = notifImageBase64;
+    document.getElementById('nImgPreviewBox').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearNotifImage(){
+  notifImageBase64 = null;
+  document.getElementById('nImgPreview').src = '';
+  document.getElementById('nImgPreviewBox').style.display = 'none';
+  document.getElementById('nImgFile').value = '';
+}
+
+function sendNotification(){
+  const icon = document.getElementById('nIcon').value.trim() || '🔔';
+  const msg = document.getElementById('nMsg').value.trim();
+  const type = document.getElementById('nType').value;
+  const duration = parseInt(document.getElementById('nDuration').value) || 6;
+  if(!msg){ showToast('Please write a message!','error'); return; }
+
+  const notif = {
+    id: Date.now(),
+    icon, msg, type, duration,
+    img: notifImageBase64 || null,
+    time: new Date().toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',day:'numeric',month:'short'}),
+    read: false
+  };
+  notifications.unshift(notif);
+  lastNotifCount = notifications.length;
+  if(notifications.length > 50) notifications = notifications.slice(0,50);
+  localStorage.setItem('mithla_notifications', JSON.stringify(notifications));
+  // Firebase send
+  if(window.FB) window.FB.sendNotif(notif);
+
+  renderNotifDrawer();
+  updateNotifBadge();
+  showNotifPopup(notif);
+  renderNotifHistory();
+  showToast('Notification sent! 🔔','success');
+  document.getElementById('nMsg').value = '';
+  clearNotifImage();
+}
+
+function showNotifPopup(notif){
+  if(notifPopupTimer) clearTimeout(notifPopupTimer);
+  document.getElementById('notifPopupIcon').textContent = notif.icon;
+  document.getElementById('notifPopupTitle').textContent = notif.msg;
+  document.getElementById('notifPopupTime').textContent = notif.time;
+  const imgWrap = document.getElementById('notifPopupImgWrap');
+  const imgEl   = document.getElementById('notifPopupImg');
+  if(notif.img){
+    imgEl.src = notif.img;
+    imgWrap.style.display = 'block';
+  } else {
+    imgEl.src = '';
+    imgWrap.style.display = 'none';
+  }
+  const popup = document.getElementById('notifPopup');
+  const colors = {offer:'#E65100',festival:'#1565C0',urgent:'#C62828',info:'#2E7D32',booking:'#6A1B9A'};
+  popup.style.borderLeftColor = colors[notif.type] || '#1565C0';
+  popup.classList.add('show');
+  notifPopupTimer = setTimeout(()=> popup.classList.remove('show'), (notif.duration||6)*1000);
+}
+
+function closeNotifPopup(){
+  document.getElementById('notifPopup').classList.remove('show');
+  if(notifPopupTimer) clearTimeout(notifPopupTimer);
+}
+
+function toggleNotifDrawer(){
+  notifDrawerOpen = !notifDrawerOpen;
+  document.getElementById('notifDrawer').classList.toggle('open', notifDrawerOpen);
+  if(notifDrawerOpen){ markAllRead(); closeNotifPopup(); }
+}
+
+function markAllRead(){
+  notifications = notifications.map(n=>({...n, read:true}));
+  localStorage.setItem('mithla_notifications', JSON.stringify(notifications));
+  updateNotifBadge();
+  renderNotifDrawer();
+}
+
+function updateNotifBadge(){
+  const unread = notifications.filter(n=>!n.read).length;
+  const badge = document.getElementById('notifBadge');
+  badge.textContent = unread > 9 ? '9+' : unread;
+  badge.classList.toggle('show', unread > 0);
+}
+
+function renderNotifDrawer(){
+  const list = document.getElementById('notifList');
+  if(!notifications.length){
+    list.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+    return;
+  }
+  list.innerHTML = notifications.slice(0,20).map(n=>`
+    <div class="notif-item ${n.img?'has-img':''} ${n.read?'':'unread'}" onclick="readNotif(${n.id})">
+      ${n.img ? `
+        <div class="notif-img-top">
+          <div class="notif-icon">${n.icon}</div>
+          <div class="notif-text" style="flex:1;min-width:0;"><p>${n.msg}</p></div>
+        </div>
+        <img class="notif-item-img" src="${n.img}" alt="offer">
+        <span style="font-size:0.72rem;color:#888;padding:0 0.25rem;">${n.time}</span>
+      ` : `
+        <div class="notif-icon">${n.icon}</div>
+        <div class="notif-text" style="flex:1;min-width:0;"><p>${n.msg}</p><span>${n.time}</span></div>
+      `}
+    </div>
+  `).join('');
+}
+
+function readNotif(id){
+  notifications = notifications.map(n=> n.id===id ? {...n,read:true} : n);
+  localStorage.setItem('mithla_notifications', JSON.stringify(notifications));
+  updateNotifBadge();
+  renderNotifDrawer();
+}
+
+function renderNotifHistory(){
+  const el = document.getElementById('notifHistory');
+  if(!el) return;
+  if(!notifications.length){ el.innerHTML='<p style="color:#aaa;font-size:0.82rem">No notifications sent yet</p>'; return; }
+  el.innerHTML = notifications.slice(0,15).map(n=>`
+    <div style="background:#f8f9fa;border-radius:10px;padding:0.75rem;display:flex;gap:0.75rem;align-items:flex-start;border-left:3px solid ${n.read?'#ddd':'#1565C0'}">
+      <span style="font-size:1.3rem;flex-shrink:0">${n.icon}</span>
+      <div style="flex:1;min-width:0">
+        <p style="margin:0 0 0.25rem;font-size:0.82rem;font-weight:600">${n.msg}</p>
+        ${n.img ? `<img src="${n.img}" alt="offer" style="width:100%;max-height:70px;object-fit:cover;border-radius:6px;margin-bottom:0.25rem;">` : ''}
+        <span style="font-size:0.72rem;color:#888">${n.time} · ${n.read?'Read':'Unread'}</span>
+      </div>
+      <button class="btn-del" onclick="deleteNotif(${n.id})" style="flex-shrink:0">✕</button>
+    </div>
+  `).join('');
+}
+
+function deleteNotif(id){
+  notifications = notifications.filter(n=>n.id!==id);
+  lastNotifCount = notifications.length;
+  localStorage.setItem('mithla_notifications', JSON.stringify(notifications));
+  renderNotifDrawer(); updateNotifBadge(); renderNotifHistory();
+}
+
+function clearAllNotifs(){
+  if(!confirm('Delete all notifications?')) return;
+  notifications = [];
+  lastNotifCount = 0;
+  localStorage.setItem('mithla_notifications', JSON.stringify(notifications));
+  renderNotifDrawer(); updateNotifBadge(); renderNotifHistory();
+  showToast('All cleared','error');
+}
+
+function loadNotifTpl(icon, msg, type){
+  document.getElementById('nIcon').value = icon;
+  document.getElementById('nMsg').value = msg;
+  document.getElementById('nType').value = type;
+  showToast('Template loaded!','success');
+}
+
+document.addEventListener('click', e=>{
+  const drawer = document.getElementById('notifDrawer');
+  const bell = document.querySelector('.notif-bell');
+  if(notifDrawerOpen && !drawer.contains(e.target) && !bell.contains(e.target)){
+    notifDrawerOpen = false;
+    drawer.classList.remove('open');
+  }
+});
 
 // ===== QUICK NAV ACTIVE =====
 (function(){
@@ -2335,6 +3311,10 @@ function switchTab(tab){
   if(tab==='addDecor') renderAdminDecorList();
   if(tab==='addLatest') renderAdminLatestList();
   if(tab==='addPuja') renderAdminPujaList();
+  if(tab==='notifications') renderNotifHistory();
+  if(tab==='manageFaq') renderFaqAdminList();
+  if(tab==='crmPanel') renderCRM();
+  if(tab==='adminSettings') loadSettingsFields();
 }
 
 // ===== ITEM CRUD =====
@@ -2470,19 +3450,30 @@ function deleteDecor(id){
   showToast('Deleted.','error');
 }
 
+// ===== YOUTUBE HELPER =====
+function getYoutubeId(url){
+  if(!url) return null;
+  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
 // ===== LATEST WORK CRUD =====
 function saveLatest(e){
   e.preventDefault();
   const editId = document.getElementById('lEditId').value;
+  const ytUrl  = document.getElementById('lYoutube').value.trim();
+  const ytId   = getYoutubeId(ytUrl);
   const item = {
     id: editId ? parseInt(editId) : Date.now(),
     title: document.getElementById('lTitle').value,
-    desc: document.getElementById('lDesc').value,
-    tag: document.getElementById('lTag').value,
+    desc:  document.getElementById('lDesc').value,
+    tag:   document.getElementById('lTag').value,
     image: document.getElementById('lImage').value,
+    youtube: ytId || null,
   };
+  if(!item.image && !item.youtube){ showToast('Image URL ya YouTube link — ek toh daalo!','error'); return; }
   if(editId){ latestItems = latestItems.map(l=>l.id===parseInt(editId)?item:l); showToast('Updated!','success'); }
-  else { latestItems.unshift(item); showToast('Latest work added!','success'); }
+  else { latestItems.unshift(item); showToast('Latest work added! 🎬','success'); }
   localStorage.setItem('mithla_latest', JSON.stringify(latestItems));
   renderLatest(); renderAdminLatestList();
   e.target.reset(); document.getElementById('lEditId').value='';
@@ -2494,8 +3485,12 @@ function renderAdminLatestList(){
   if(!latestItems.length){ list.innerHTML=''; return; }
   list.innerHTML = '<p style="font-weight:700;margin-bottom:0.75rem">Added:</p>' + latestItems.map(l=>`
     <div class="list-item">
-      ${l.image?`<img src="${l.image}" onerror="this.style.display='none'">`:''}
-      <div class="list-info"><strong>${l.title}</strong><span>${l.tag||''}</span></div>
+      ${l.youtube ? `<div style="background:#ff0000;color:white;width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0;">▶</div>`
+        : l.image ? `<img src="${l.image}" onerror="this.style.display='none'">` : ''}
+      <div class="list-info">
+        <strong>${l.title}</strong>
+        <span>${l.tag||''}${l.youtube?' • 🎬 YouTube Video':''}</span>
+      </div>
       <div class="list-actions">
         <button class="btn-del" onclick="deleteLatest(${l.id})">Del</button>
       </div>
@@ -2515,15 +3510,44 @@ function saveSettings(){
   const newPass = document.getElementById('sNewPass').value;
   settings = {
     ...settings,
-    emailPublicKey: document.getElementById('sPublicKey').value,
-    emailServiceId: document.getElementById('sServiceId').value,
+    emailPublicKey:  document.getElementById('sPublicKey').value,
+    emailServiceId:  document.getElementById('sServiceId').value,
     emailTemplateId: document.getElementById('sTemplateId').value,
-    whatsapp: document.getElementById('sWA').value,
+    whatsapp:        document.getElementById('sWA').value,
+    facebook:        document.getElementById('sFacebook').value.trim(),
+    instagram:       document.getElementById('sInstagram').value.trim(),
+    youtube:         document.getElementById('sYoutube').value.trim(),
   };
   if(newPass) settings.adminPass = newPass;
   localStorage.setItem('mithla_settings', JSON.stringify(settings));
   if(settings.emailPublicKey) emailjs.init(settings.emailPublicKey);
+  renderSocialLinks();
   showToast('✅ Settings saved!','success');
+}
+
+function renderSocialLinks(){
+  const s = settings;
+  const wa = s.whatsapp || WA_NUM;
+  const links = [
+    { url: s.facebook,  icon: 'fab fa-facebook',  color: '#1877F2', show: !!s.facebook },
+    { url: s.instagram, icon: 'fab fa-instagram',  color: '#E1306C', show: !!s.instagram },
+    { url: s.youtube,   icon: 'fab fa-youtube',    color: '#FF0000', show: !!s.youtube },
+    { url: `https://wa.me/${wa}`, icon: 'fab fa-whatsapp', color: '#25D366', show: true },
+  ];
+  const el = document.getElementById('footerSocialLinks');
+  if(!el) return;
+  el.innerHTML = links.filter(l=>l.show).map(l=>`
+    <a href="${l.url}" target="_blank" style="color:${l.color};" title="${l.icon.split('fa-')[1]}">
+      <i class="${l.icon}"></i>
+    </a>
+  `).join('');
+}
+
+// Load social fields in settings tab
+function loadSettingsFields(){
+  if(document.getElementById('sFacebook'))  document.getElementById('sFacebook').value  = settings.facebook  || '';
+  if(document.getElementById('sInstagram')) document.getElementById('sInstagram').value = settings.instagram || '';
+  if(document.getElementById('sYoutube'))   document.getElementById('sYoutube').value   = settings.youtube   || '';
 }
 
 // ===== HEADER SCROLL + PROGRESS BAR =====
@@ -2559,7 +3583,7 @@ function renderPercentBadges(){
 
 function addDiscountPercent(){
   const val = parseInt(document.getElementById('addPercent').value);
-  if(!val || val<1 || val>99){ showToast('1-99 ke beech number daalo!','error'); return; }
+  if(!val || val<1 || val>50){ showToast('⚠️ Sirf 1% se 50% tak valid hai! (5000, 98 jaisi values nahi)','error'); return; }
   if(!discountPercents.includes(val)){
     discountPercents.push(val);
     discountPercents.sort((a,b)=>a-b);
@@ -2581,6 +3605,301 @@ function clearDiscount(){
   activeDiscount = null;
   localStorage.removeItem('mithla_discount');
   showToast('Discount cleared!','success');
+}
+
+// ===== FOCUS MODE =====
+let currentFocusSection = null;
+
+function focusSection(id, label, e){
+  if(e) e.preventDefault();
+  currentFocusSection = id;
+
+  // Remove previous focus-active
+  document.querySelectorAll('.focus-active').forEach(el => el.classList.remove('focus-active'));
+
+  // Mark target section active
+  const target = document.getElementById(id);
+  if(!target) return;
+  target.classList.add('focus-active');
+
+  // Enable focus mode
+  document.body.classList.add('focus-mode');
+
+  // Show back bar
+  const bar = document.getElementById('focusBackBar');
+  document.getElementById('focusBackLabel').textContent = label;
+  bar.classList.add('show');
+
+  // Scroll to top of section
+  setTimeout(() => {
+    window.scrollTo({top: bar.offsetTop - 10, behavior:'smooth'});
+  }, 50);
+
+  // Highlight offer items in this section
+  highlightOfferItems(target);
+}
+
+function exitFocusMode(){
+  document.body.classList.remove('focus-mode');
+  document.querySelectorAll('.focus-active').forEach(el => el.classList.remove('focus-active'));
+  document.getElementById('focusBackBar').classList.remove('show');
+  currentFocusSection = null;
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function highlightOfferItems(section){
+  // Remove previous offer highlights
+  section.querySelectorAll('.item-card').forEach(card => card.classList.remove('is-offer'));
+  // Find cards with badge
+  section.querySelectorAll('.item-card').forEach(card => {
+    const badge = card.querySelector('.item-badge');
+    if(badge && badge.textContent.trim()){
+      card.classList.add('is-offer');
+      // Move offer label if not already added
+      if(!card.querySelector('.focus-offer-badge')){
+        const label = document.createElement('span');
+        label.className = 'focus-offer-badge';
+        label.innerHTML = '🔥 Offer';
+        const head = card.querySelector('.item-head, .item-info, .item-cat');
+        if(head) head.parentNode.insertBefore(label, head);
+      }
+    }
+  });
+  // Make grid use flexbox so order:-1 works
+  const grid = section.querySelector('.items-grid');
+  if(grid) grid.style.display = 'flex', grid.style.flexWrap = 'wrap', grid.style.gap = '1.5rem';
+}
+
+// ===== PAGE VIEW COUNTER (Firebase handles live count — localStorage fallback) =====
+(function(){
+  // Display from localStorage cache while Firebase loads
+  window.addEventListener('load', function(){
+    const el = document.getElementById('liveViewCount');
+    if(!el) return;
+    const views = JSON.parse(localStorage.getItem('mithla_views') || '{"total":0}');
+    el.textContent = (views.total||0).toLocaleString('en-IN');
+    // Firebase listener will update this in real time once connected
+  });
+})();
+
+
+// ===== CRM FUNCTIONS =====
+function renderCRM(){
+  const leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  const views = JSON.parse(localStorage.getItem('mithla_views') || '{"total":0,"today":0}');
+  const search = (document.getElementById('crmSearch')?.value || '').toLowerCase();
+  const filter = document.getElementById('crmFilter')?.value || 'all';
+
+  // Update stats
+  const el = id => document.getElementById(id);
+  if(el('crmTotalViews')) el('crmTotalViews').textContent = views.total.toLocaleString('en-IN');
+  if(el('crmTodayViews')) el('crmTodayViews').textContent = views.today;
+  if(el('crmTotalLeads')) el('crmTotalLeads').textContent = leads.length;
+
+  const list = el('crmList');
+  if(!list) return;
+
+  let filtered = leads;
+  if(filter !== 'all') filtered = filtered.filter(l => l.status === filter);
+  if(search) filtered = filtered.filter(l =>
+    (l.name||'').toLowerCase().includes(search) ||
+    (l.phone||'').includes(search) ||
+    (l.eventType||'').toLowerCase().includes(search)
+  );
+
+  if(!filtered.length){
+    list.innerHTML = `<div style="text-align:center;padding:2rem;color:#aaa;font-size:0.85rem;">${leads.length===0?'Abhi tak koi inquiry nahi aayi.':'Koi result nahi mila.'}</div>`;
+    return;
+  }
+
+  const statusColor = {new:'#1565C0', contacted:'#2E7D32', booked:'#E65100'};
+  const statusLabel = {new:'🆕 Naya', contacted:'✅ Contacted', booked:'🎉 Booked'};
+
+  list.innerHTML = filtered.map(l => `
+    <div style="background:white;border-radius:12px;padding:1rem;margin-bottom:0.75rem;border:1.5px solid #eee;border-left:4px solid ${statusColor[l.status]||'#ccc'};">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem;flex-wrap:wrap;">
+        <div style="flex:1;min-width:0;">
+          <p style="font-weight:700;font-size:0.92rem;margin:0 0 2px;">${l.name||'—'}</p>
+          <a href="tel:${l.phone}" style="font-size:0.82rem;color:#1565C0;font-weight:600;text-decoration:none;">📞 ${l.phone||'—'}</a>
+        </div>
+        <span style="background:${statusColor[l.status]||'#ddd'};color:white;padding:3px 10px;border-radius:20px;font-size:0.72rem;font-weight:700;white-space:nowrap;">${statusLabel[l.status]||'—'}</span>
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin:0.5rem 0;font-size:0.78rem;color:#666;">
+        <span>🎉 ${l.eventType||'—'}</span>
+        ${l.eventDate ? `<span>📅 ${l.eventDate}</span>` : ''}
+        <span style="color:#aaa;">🕐 ${l.time}</span>
+      </div>
+      ${l.message ? `<p style="font-size:0.8rem;color:#555;background:#f8f9fa;padding:0.5rem 0.75rem;border-radius:8px;margin:0.4rem 0 0.6rem;">"${l.message}"</p>` : ''}
+      <input type="text" value="${l.note||''}" placeholder="📝 Note likhein (aapke liye sirf)" onchange="saveLeadNote(${l.id},this.value)"
+        style="width:100%;border:1px solid #eee;border-radius:8px;padding:0.4rem 0.7rem;font-size:0.78rem;font-family:Poppins,sans-serif;margin-bottom:0.5rem;box-sizing:border-box;">
+      <div style="display:flex;gap:0.4rem;flex-wrap:wrap;">
+        <a href="https://wa.me/91${(l.phone||'').replace(/\D/g,'')}?text=${encodeURIComponent('Namaste '+l.name+'! Mithla Tent Light DJ & Sound ki taraf se special offer aapke liye hai 🎉')}" 
+          target="_blank" style="flex:1;background:#25D366;color:white;border:none;border-radius:50px;padding:0.45rem 0.75rem;font-size:0.78rem;font-weight:700;cursor:pointer;text-align:center;text-decoration:none;display:inline-block;">
+          <i class="fab fa-whatsapp"></i> WA
+        </a>
+        <select onchange="updateLeadStatus(${l.id},this.value)" style="flex:2;padding:0.4rem 0.5rem;border-radius:50px;border:1.5px solid #ddd;font-size:0.78rem;font-family:Poppins,sans-serif;">
+          <option value="new" ${l.status==='new'?'selected':''}>🆕 Naya</option>
+          <option value="contacted" ${l.status==='contacted'?'selected':''}>✅ Contacted</option>
+          <option value="booked" ${l.status==='booked'?'selected':''}>🎉 Booked</option>
+        </select>
+        <button onclick="deleteLead(${l.id})" class="btn-del" style="border-radius:50px;padding:0.45rem 0.7rem;font-size:0.78rem;">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function saveLeadNote(id, note){
+  const leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  const idx = leads.findIndex(l => l.id == id);
+  if(idx > -1){
+    leads[idx].note = note;
+    localStorage.setItem('mithla_leads', JSON.stringify(leads));
+    if(window.FB && leads[idx].firebaseId) window.FB.saveLeadNote(leads[idx].firebaseId, note);
+  }
+}
+
+function updateLeadStatus(id, status){
+  const leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  const idx = leads.findIndex(l => l.id == id);
+  if(idx > -1){
+    leads[idx].status = status;
+    localStorage.setItem('mithla_leads', JSON.stringify(leads));
+    // Firebase update
+    if(window.FB && leads[idx].firebaseId) window.FB.updateLeadStatus(leads[idx].firebaseId, status);
+    renderCRM(); showToast('Status update ho gaya!','success');
+  }
+}
+
+function deleteLead(id){
+  if(!confirm('Is customer ko delete karna chahte ho?')) return;
+  let leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  leads = leads.filter(l => l.id !== id);
+  localStorage.setItem('mithla_leads', JSON.stringify(leads));
+  renderCRM(); showToast('Delete ho gaya.','error');
+}
+
+function clearAllCRM(){
+  if(!confirm('Sab customers aur leads delete karna chahte ho? Yeh wapas nahi aayega.')) return;
+  localStorage.removeItem('mithla_leads');
+  renderCRM(); showToast('Sab data clear ho gaya.','error');
+}
+
+function sendBulkWA(filter){
+  const msg = document.getElementById('crmBulkMsg').value.trim();
+  if(!msg){ showToast('Pehle message likho!','error'); return; }
+  const leads = JSON.parse(localStorage.getItem('mithla_leads') || '[]');
+  const targets = filter === 'new' ? leads.filter(l => l.status === 'new') : leads;
+  if(!targets.length){ showToast('Koi customer nahi mila!','error'); return; }
+
+  let i = 0;
+  function sendNext(){
+    if(i >= targets.length){ showToast(`${i} customers ko message bheja! ✅`,'success'); return; }
+    const l = targets[i++];
+    const phone = (l.phone||'').replace(/\D/g,'');
+    if(!phone){ sendNext(); return; }
+    const personalMsg = msg.replace(/\{naam\}/gi, l.name||'');
+    window.open(`https://wa.me/91${phone}?text=${encodeURIComponent(personalMsg)}`, '_blank');
+    setTimeout(sendNext, 1500);
+  }
+  sendNext();
+}
+
+// ===== FAQ ADMIN FUNCTIONS =====
+function renderFaqSection(){
+  const container = document.querySelector('#faq .reveal > div[style]') || document.querySelector('#faq .container .reveal');
+  // Render to the public FAQ section
+  const wrap = document.querySelector('#faq .reveal');
+  if(!wrap) return;
+  // Remove old faq items, keep heading and WA button
+  const existing = wrap.querySelectorAll('.faq-item');
+  existing.forEach(e => e.remove());
+  const waBtn = wrap.querySelector('[href*="wa.me"]')?.closest('div[style*="text-align:center"]');
+  faqItems.forEach(f => {
+    const div = document.createElement('div');
+    div.className = 'faq-item';
+    div.onclick = function(){ toggleFaq(this); };
+    div.innerHTML = `<div class="faq-q"><span>${f.q}</span><i class="fas fa-chevron-down faq-arrow"></i></div><div class="faq-a"><p>${f.a.replace(/\n/g,'<br>')}</p></div>`;
+    if(waBtn) wrap.insertBefore(div, waBtn.previousElementSibling?.nextElementSibling || waBtn);
+    else wrap.appendChild(div);
+  });
+  // Also refresh admin list if open
+  if(document.getElementById('faqAdminList')) renderFaqAdminList();
+}
+
+function renderFaqAdminList(){
+  const list = document.getElementById('faqAdminList');
+  if(!list) return;
+  if(faqItems.length === 0){
+    list.innerHTML = '<p style="text-align:center;color:#aaa;padding:1rem;">Koi FAQ nahi hai. Upar se add karo.</p>';
+    return;
+  }
+  list.innerHTML = faqItems.map((f,i) => `
+    <div style="background:white;border-radius:12px;padding:1rem 1.25rem;margin-bottom:0.75rem;border:1.5px solid #eee;display:flex;align-items:flex-start;gap:0.75rem;">
+      <div style="flex:1;min-width:0;">
+        <p style="font-weight:700;font-size:0.9rem;margin-bottom:0.3rem;color:var(--dark);">${f.q}</p>
+        <p style="font-size:0.82rem;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${f.a.replace(/\n/g,' • ')}</p>
+      </div>
+      <div style="display:flex;gap:0.4rem;flex-shrink:0;">
+        <button onclick="editFaq(${f.id})" style="background:#EBF5FB;color:#1565C0;border:none;border-radius:8px;padding:0.4rem 0.75rem;cursor:pointer;font-weight:600;font-size:0.82rem;">✏️ Edit</button>
+        <button onclick="deleteFaq(${f.id})" class="btn-del" style="font-size:0.82rem;padding:0.4rem 0.75rem;">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function saveFaq(){
+  const q = document.getElementById('faqQ').value.trim();
+  const a = document.getElementById('faqA').value.trim();
+  const editId = document.getElementById('faqEditId').value;
+  if(!q || !a){ showToast('Sawal aur jawab dono bharo!','error'); return; }
+  if(editId){
+    const idx = faqItems.findIndex(f => f.id == editId);
+    if(idx > -1){ faqItems[idx].q = q; faqItems[idx].a = a; }
+    showToast('FAQ update ho gaya! ✅','success');
+  } else {
+    const newId = Date.now();
+    faqItems.push({id: newId, q, a});
+    showToast('Naya FAQ add ho gaya! ✅','success');
+  }
+  localStorage.setItem('mithla_faq', JSON.stringify(faqItems));
+  cancelFaqEdit();
+  renderFaqSection();
+}
+
+function editFaq(id){
+  const f = faqItems.find(f => f.id === id);
+  if(!f) return;
+  document.getElementById('faqQ').value = f.q;
+  document.getElementById('faqA').value = f.a;
+  document.getElementById('faqEditId').value = id;
+  document.getElementById('faqFormTitle').textContent = '✏️ FAQ Edit Karo';
+  document.getElementById('faqSaveBtn').textContent = '💾 Save Changes';
+  document.getElementById('faqCancelBtn').style.display = 'block';
+  document.getElementById('faqFormBox').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function cancelFaqEdit(){
+  document.getElementById('faqQ').value = '';
+  document.getElementById('faqA').value = '';
+  document.getElementById('faqEditId').value = '';
+  document.getElementById('faqFormTitle').textContent = '➕ Naya Sawal Add Karo';
+  document.getElementById('faqSaveBtn').textContent = '➕ Add FAQ';
+  document.getElementById('faqCancelBtn').style.display = 'none';
+}
+
+function deleteFaq(id){
+  if(!confirm('Yeh FAQ delete karna chahte ho?')) return;
+  faqItems = faqItems.filter(f => f.id !== id);
+  localStorage.setItem('mithla_faq', JSON.stringify(faqItems));
+  renderFaqSection();
+  showToast('FAQ delete ho gaya!');
+}
+
+// ===== FAQ TOGGLE =====
+function toggleFaq(el){
+  const isOpen = el.classList.contains('open');
+  document.querySelectorAll('.faq-item.open').forEach(i => i.classList.remove('open'));
+  if(!isOpen) el.classList.add('open');
 }
 
 // ===== START =====
